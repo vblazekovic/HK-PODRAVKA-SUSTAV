@@ -310,7 +310,7 @@ section = st.sidebar.radio(
     "Odaberite odjeljak",
     [
         "1) Osnovni podaci",
-        "2) Članovi (soon)",
+        "2) Članovi",
         "3) Treneri (soon)",
         "4) Natjecanja i rezultati (soon)",
         "5) Statistika (soon)",
