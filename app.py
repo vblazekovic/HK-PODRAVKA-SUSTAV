@@ -1,39 +1,47 @@
+
 import streamlit as st
 from io import BytesIO
 import json
 from datetime import datetime
 
+# Set page config ASAP
+st.set_page_config(page_title="HK Podravka — Admin", page_icon="🥇", layout="wide")
+
 BRAND = {"red":"#C81414","gold":"#C8A94A","white":"#FFFFFF"}
 
 def _inject_brand_css():
-    st.markdown(f"""\n<style>
-            :root {
-                --brand-red: {BRAND['red']};
-                --brand-gold: {BRAND['gold']};
-                --brand-white: {BRAND['white']};
-            }
-            .brand-card {
-                border: 1px solid rgba(0,0,0,0.08);
-                border-radius: 14px;
-                padding: 14px 18px;
-                background: var(--brand-white);
-                box-shadow: 0 2px 16px rgba(0,0,0,0.04);
-            }
-            .brand-badge {
-                background: var(--brand-gold);
-                color: #111;
-                font-weight: 700;
-                padding: 2px 10px;
-                border-radius: 999px;
-                font-size: 12px;
-                letter-spacing: .3px;
-            }
-            .brand-title { font-weight: 800; font-size: 22px; margin: 0; }
-            .brand-sub { color:#555; font-size: 13px; margin-top:2px; }
-            .brand-hr { border: none; height: 1px; background: rgba(0,0,0,.08); margin: 10px 0 12px 0; }
-            .required:after { content:\" *\"; color: var(--brand-red); font-weight: 900; }
-            .stDownloadButton button, .stButton>button { border-radius: 10px !important; font-weight: 700 !important; }
-        </style>\n""", unsafe_allow_html=True)
+    # Avoid f-strings inside CSS: replace placeholders safely
+    css = """
+    <style>
+        :root {
+            --brand-red: __RED__;
+            --brand-gold: __GOLD__;
+            --brand-white: __WHITE__;
+        }
+        .brand-card {
+            border: 1px solid rgba(0,0,0,0.08);
+            border-radius: 14px;
+            padding: 14px 18px;
+            background: var(--brand-white);
+            box-shadow: 0 2px 16px rgba(0,0,0,0.04);
+        }
+        .brand-badge {
+            background: var(--brand-gold);
+            color: #111;
+            font-weight: 700;
+            padding: 2px 10px;
+            border-radius: 999px;
+            font-size: 12px;
+            letter-spacing: .3px;
+        }
+        .brand-title { font-weight: 800; font-size: 22px; margin: 0; }
+        .brand-sub { color:#555; font-size: 13px; margin-top:2px; }
+        .brand-hr { border: none; height: 1px; background: rgba(0,0,0,.08); margin: 10px 0 12px 0; }
+        .required:after { content:" *"; color: var(--brand-red); font-weight: 900; }
+        .stDownloadButton button, .stButton>button { border-radius: 10px !important; font-weight: 700 !important; }
+    </style>
+    """.replace("__RED__", BRAND["red"]).replace("__GOLD__", BRAND["gold"]).replace("__WHITE__", BRAND["white"])
+    st.markdown(css, unsafe_allow_html=True)
 
 def _init_state():
     ss = st.session_state
@@ -204,9 +212,10 @@ def render_prvi_odjeljak():
     st.markdown('<hr class="brand-hr" />', unsafe_allow_html=True)
     st.caption("© HK Podravka — Admin modul · Boje: crvena, bijela, zlatna · Sekcija 1/8")
 
-st.set_page_config(page_title="HK Podravka — Admin", page_icon="🥇", layout="wide")
+# Bootstrap
 _inject_brand_css()
 _init_state()
+
 st.sidebar.image("assets/logo.png", use_column_width=True)
 st.sidebar.markdown("### HK Podravka — Admin")
 section = st.sidebar.radio(
@@ -226,7 +235,7 @@ section = st.sidebar.radio(
     index=0
 )
 
-if section.startswith('1'):
+if section.startswith("1"):
     render_prvi_odjeljak()
 else:
-    st.info('Ovaj odjeljak će biti dodan u sljedećim koracima. Trenutno je aktivna Sekcija 1 — Osnovni podaci o klubu.')
+    st.info("Ovaj odjeljak će biti dodan u sljedećim koracima. Trenutno je aktivna Sekcija 1 — Osnovni podaci o klubu.")
