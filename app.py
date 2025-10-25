@@ -9,6 +9,31 @@ st.set_page_config(page_title="HK Podravka — Admin", page_icon="🥇", layout=
 
 BRAND = {"red":"#C81414","gold":"#C8A94A","white":"#FFFFFF"}
 
+
+def _safe_logo_image(path: str, sidebar=False):
+    import os
+    if os.path.exists(path):
+        if sidebar:
+            st.sidebar.image(path, use_column_width=True)
+        else:
+            st.image(path, use_column_width=True)
+    else:
+        # Fallback badge
+        badge_html = """
+        <div style="display:flex;align-items:center;gap:10px;">
+            <div style="width:44px;height:44px;border-radius:50%;background:#C81414;
+                        display:flex;align-items:center;justify-content:center;color:#fff;font-weight:900;">
+                HK
+            </div>
+            <div style="font-weight:800;">HK PODRAVKA</div>
+        </div>
+        """
+        if sidebar:
+            st.sidebar.markdown(badge_html, unsafe_allow_html=True)
+        else:
+            st.markdown(badge_html, unsafe_allow_html=True)
+
+
 def _inject_brand_css():
     # Avoid f-strings inside CSS: replace placeholders safely
     css = """
@@ -104,7 +129,7 @@ def render_prvi_odjeljak():
             st.markdown('<div class="brand-badge">HK PODRAVKA</div>', unsafe_allow_html=True)
             logo_col1, logo_col2 = st.columns([1,1])
             with logo_col1:
-                st.image(st.session_state.club_data.get("logo_path_hint", "assets/logo.png"), caption="Logo (putanja)", use_column_width=True)
+                _safe_logo_image(st.session_state.club_data.get("logo_path_hint", "assets/logo.png"))
             with logo_col2:
                 new_logo = st.file_uploader("Promijeni logo (PNG/JPG)", type=["png","jpg","jpeg"], key="logo_upload")
                 if new_logo:
@@ -216,7 +241,7 @@ def render_prvi_odjeljak():
 _inject_brand_css()
 _init_state()
 
-st.sidebar.image("assets/logo.png", use_column_width=True)
+_safe_logo_image("assets/logo.png", sidebar=True)
 st.sidebar.markdown("### HK Podravka — Admin")
 section = st.sidebar.radio(
     "Odaberite odjeljak",
