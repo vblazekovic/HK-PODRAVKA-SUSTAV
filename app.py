@@ -481,5 +481,247 @@ with tabs[1]:
         st.info("Još nema unesenih članova.")
 
 # --------------------- Kraj ---------------------
+# ===================== SEKCIJA 3 – TRENERI =====================
+# (Zalijepi ispod postojećeg koda bez izmjena gore)
 
+import datetime
+from pathlib import Path
+from io import BytesIO
+
+try:
+    # koristimo postojeće pomoćne varijable/funkcije ako postoje
+    DATA_DIR
+except NameError:
+    # minimalni fallback (neće se koristiti ako je sekcija 1/2 već zalijepljena)
+    from pathlib import Path
+    DATA_DIR = Path("data"); DATA_DIR.mkdir(exist_ok=True)
+    UPLOAD_DIR = Path("uploads"); UPLOAD_DIR.mkdir(exist_ok=True)
+    def load_json(p, d):
+        import json
+        return json.loads(Path(p).read_text("utf-8")) if Path(p).exists() else d
+    def save_json(p, data):
+        import json
+        Path(p).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
+    def safe_save(file, target_dir: Path):
+        if not file: return ""
+        name = Path(file.name); ext = name.suffix.lower()
+        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        safe = f"{name.stem}_{stamp}{ext}"
+        out = target_dir / safe; out.write_bytes(file.read()); return str(out)
+
+try:
+    import streamlit as st
+except:
+    pass  # ako nije streamlit okruženje, ova sekcija se jednostavno neće renderirati
+
+TRAINERS_JSON = DATA_DIR / "trainers.json"
+TRAINER_DIR = (UPLOAD_DIR / "trainers")
+TRAINER_DIR.mkdir(parents=True, exist_ok=True)
+
+def load_trainers():
+    return load_json(TRAINERS_JSON, {"seq": 1, "items": []})
+
+def save_trainers(d):
+    save_json(TRAINERS_JSON, d)
+
+def new_trainer_id(store):
+    tid = store["seq"]; store["seq"] += 1; return tid
+
+# ------- UI: naslov izvan starih tabova, pojavit će se ispod Sekcije 2 -------
+st.markdown("---")
+st.subheader("🏋️‍♂️ Treneri (Sekcija 3)")
+
+trainers = load_trainers()
+
+# ========== PREDLOŽAK / UVOZ / IZVOZ ==========
+from openpyxl import Workbook, load_workbook
+
+cc1, cc2, cc3 = st.columns(3)
+with cc1:
+    if st.button("📄 Predložak (treneri.xlsx)"):
+        wb = Workbook(); ws = wb.active; ws.title = "Treneri"
+        ws.append([
+            "ime_prezime","datum_rodjenja(YYYY-MM-DD)","oib","email","iban",
+            "grupe(više odvojenih zarezom)"
+        ])
+        bio = BytesIO(); wb.save(bio); bio.seek(0)
+        st.download_button("⬇️ Preuzmi predložak", bio.getvalue(),
+                           file_name="predlozak_treneri.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_tr_tpl")
+with cc2:
+    upl_tr = st.file_uploader("Uvoz trenera (.xlsx)", type=["xlsx"], key="upl_tr_xlsx")
+    if upl_tr and st.button("📥 Uvezi .xlsx"):
+        wb = load_workbook(upl_tr); ws = wb.active
+        rows = list(ws.iter_rows(values_only=True))
+        if rows:
+            header = [str(h).strip() if h is not None else "" for h in rows[0]]
+            idx = {h:i for i,h in enumerate(header)}
+            def val(row, key):
+                i = idx.get(key, None)
+                return (str(row[i]).strip() if i is not None and row[i] is not None else "")
+            cnt = 0
+            for row in rows[1:]:
+                if not row: continue
+                name = val(row, "ime_prezime")
+                if not name: continue
+                t = {
+                    "id": new_trainer_id(trainers),
+                    "ime_prezime": name,
+                    "datum_rodjenja": val(row, "datum_rodjenja(YYYY-MM-DD)") or "",
+                    "oib": val(row, "oib"),
+                    "email": val(row, "email"),
+                    "iban": val(row, "iban"),
+                    "grupe": [s.strip() for s in (val(row, "grupe(više odvojenih zarezom)") or "").split(",") if s.strip()],
+                    "slika_path": "",
+                    "ugovor_path": "",
+                    "ostali_dokumenti": []
+                }
+                trainers["items"].append(t); cnt += 1
+            save_trainers(trainers)
+            st.success(f"Uvezeno trenera: {cnt}")
+with cc3:
+    if st.button("📤 Izvoz trenera (XLSX)"):
+        wb = Workbook(); ws = wb.active; ws.title = "Treneri"
+        ws.append(["id","ime_prezime","datum_rodjenja","oib","email","iban","grupe"])
+        for t in trainers["items"]:
+            ws.append([
+                t.get("id"), t.get("ime_prezime"), t.get("datum_rodjenja"),
+                t.get("oib"), t.get("email"), t.get("iban"),
+                ", ".join(t.get("grupe", []))
+            ])
+        bio = BytesIO(); wb.save(bio); bio.seek(0)
+        st.download_button("⬇️ Preuzmi trenere", bio.getvalue(),
+                           file_name="treneri_izvoz.xlsx",
+                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+                           key="dl_tr_export")
+
+st.markdown("")
+
+# ========== DODAJ / UREDI TRENERA ==========
+if "edit_trainer_id" not in st.session_state:
+    st.session_state.edit_trainer_id = None
+
+with st.expander("➕ Dodaj / uredi trenera", expanded=True):
+    editing = None
+    if st.session_state.edit_trainer_id:
+        editing = next((x for x in trainers["items"] if x["id"] == st.session_state.edit_trainer_id), None)
+
+    with st.form("frm_trener"):
+        c1, c2, c3 = st.columns(3)
+        with c1:
+            ime = st.text_input("Ime i prezime", value=(editing or {}).get("ime_prezime",""))
+            dob = st.date_input("Datum rođenja", value=(
+                datetime.date.fromisoformat(editing["datum_rodjenja"]) if (editing and editing.get("datum_rodjenja")) else None
+            ), format="YYYY-MM-DD")
+            oib = st.text_input("OIB", value=(editing or {}).get("oib",""))
+            slika_f = st.file_uploader("Slika trenera (jpg/png/svg/webp)", type=["jpg","jpeg","png","svg","webp"], key="tr_slika")
+        with c2:
+            email = st.text_input("E-mail", value=(editing or {}).get("email",""))
+            iban = st.text_input("IBAN", value=(editing or {}).get("iban",""))
+            grupe_sve = sorted(set(
+                ["Hrvači U11","Hrvači U13","Hrvači U15","Hrvači U17","Hrvači U20","Seniori",
+                 "Hrvačice U13","Hrvačice U15","Hrvačice U17","Hrvačice U20","Veterani","Ostalo"] +
+                sum([t.get("grupe", []) for t in trainers["items"]], [])
+            ))
+            grupe = st.multiselect("Grupa/e koju vodi", options=grupe_sve,
+                                   default=(editing or {}).get("grupe", []))
+        with c3:
+            ugovor_f = st.file_uploader("Ugovor (PDF/Doc)", type=["pdf","doc","docx"], key="tr_ugovor")
+            ostali_f = st.file_uploader("Ostali dokumenti", type=["pdf","doc","docx","xls","xlsx","jpg","jpeg","png"], accept_multiple_files=True, key="tr_docs")
+
+        submit = st.form_submit_button("💾 Spremi trenera")
+        if submit:
+            store = trainers
+            if editing:  # ažuriranje postojećeg
+                t = editing
+            else:        # novi
+                t = {"id": new_trainer_id(store), "slika_path":"", "ugovor_path":"", "ostali_dokumenti": []}
+
+            t["ime_prezime"] = ime.strip()
+            t["datum_rodjenja"] = dob.isoformat() if dob else ""
+            t["oib"] = oib.strip()
+            t["email"] = email.strip()
+            t["iban"] = iban.strip()
+            t["grupe"] = grupe
+
+            if slika_f:
+                t["slika_path"] = safe_save(slika_f, TRAINER_DIR)
+            if ugovor_f:
+                t["ugovor_path"] = safe_save(ugovor_f, TRAINER_DIR)
+            if ostali_f:
+                lst = t.get("ostali_dokumenti", [])
+                for f in ostali_f:
+                    lst.append(safe_save(f, TRAINER_DIR))
+                t["ostali_dokumenti"] = lst
+
+            if editing:
+                # zamijeni zapis
+                store["items"] = [x if x["id"] != t["id"] else t for x in store["items"]]
+            else:
+                store["items"].append(t)
+
+            save_trainers(store)
+            st.session_state.edit_trainer_id = None
+            st.success("Trener spremljen.")
+            st.rerun()
+
+# ========== POPIS TRENERA ==========
+st.markdown("### Popis trenera")
+items_t = sorted(load_trainers()["items"], key=lambda x: (x.get("ime_prezime",""), x["id"]))
+
+if not items_t:
+    st.info("Još nema unesenih trenera.")
+else:
+    import math
+    per_row = 2
+    rows = math.ceil(len(items_t) / per_row)
+    for r in range(rows):
+        cols = st.columns(per_row)
+        for i, col in enumerate(cols):
+            idx = r*per_row + i
+            if idx >= len(items_t): continue
+            t = items_t[idx]
+            with col:
+                with st.container(border=True):
+                    top = st.columns([1,2])
+                    with top[0]:
+                        if t.get("slika_path") and Path(t["slika_path"]).exists():
+                            st.image(t["slika_path"], width=120)
+                        else:
+                            st.caption("Nema slike")
+                    with top[1]:
+                        st.markdown(f"**{t.get('ime_prezime','')}**")
+                        st.markdown(f"📧 {t.get('email','—')}")
+                        st.markdown(f"🆔 OIB: {t.get('oib','—')}")
+                        st.markdown(f"🏦 IBAN: {t.get('iban','—')}")
+                        gr = t.get("grupe", [])
+                        st.markdown("👥 Grupe: " + (", ".join(gr) if gr else "—"))
+
+                    # dokumenti – download gumbi
+                    docs = []
+                    if t.get("ugovor_path") and Path(t["ugovor_path"]).exists():
+                        docs.append(("Ugovor", t["ugovor_path"]))
+                    for j, p in enumerate(t.get("ostali_dokumenti", [])):
+                        if p and Path(p).exists():
+                            docs.append((f"Dokument {j+1}", p))
+                    if docs:
+                        st.markdown("**Dokumenti:**")
+                        for lbl, pth in docs:
+                            with open(pth, "rb") as fh:
+                                st.download_button(f"📥 {lbl}", fh.read(), file_name=Path(pth).name, key=f"dl_{t['id']}_{lbl}")
+
+                    # akcije
+                    a1, a2 = st.columns(2)
+                    with a1:
+                        if st.button("✏️ Uredi", key=f"edit_{t['id']}"):
+                            st.session_state.edit_trainer_id = t["id"]
+                            st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.rerun()
+                    with a2:
+                        if st.button("🗑️ Obriši", key=f"del_{t['id']}"):
+                            store = load_trainers()
+                            store["items"] = [x for x in store["items"] if x["id"] != t["id"]]
+                            save_trainers(store)
+                            st.success("Trener obrisan.")
+                            st.rerun()
 
