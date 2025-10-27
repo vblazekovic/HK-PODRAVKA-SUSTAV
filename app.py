@@ -140,7 +140,8 @@ def section_club():
         try:
             d = pd.read_json(js)
             if isinstance(d, pd.DataFrame): return d
-        except Exception: ...
+        except Exception:
+            pass
         return pd.DataFrame(columns=["ime_prezime","telefon","email"])
     board_pref = _df(row.get("board_json","[]"))
     sup_pref = _df(row.get("supervisory_json","[]"))
@@ -446,7 +447,11 @@ def section_stats():
     with c3:
         group_filter = st.selectbox("Grupa", options=["(sve)"] + pd.read_sql_query("SELECT DISTINCT COALESCE(group_name,'') AS g FROM members ORDER BY g", conn)['g'].fillna('').tolist())
     with c4:
-        _d = pd.read_sql_query("SELECT DISTINCT json_each.value AS coach FROM competitions, json_each(competitions.coaches_json) ORDER BY 1", conn)
+        _tmp=[]
+        try:
+            _d = pd.read_sql_query("SELECT DISTINCT json_each.value AS coach FROM competitions, json_each(competitions.coaches_json) ORDER BY 1", conn)
+        except Exception:
+            _d = pd.DataFrame({'coach': []})
         coach_filter = st.selectbox("Trener", options=["(svi)"] + _d['coach'].fillna('').tolist() if not _d.empty else ["(svi)"])
     year = year_to
     where, pars = _stats_where_clause(group_filter, coach_filter, year_from, year_to)
@@ -512,7 +517,10 @@ def section_stats():
 
     st.divider()
     st.subheader("Per-trener (po godinama)")
-    coaches_list = pd.read_sql_query("SELECT DISTINCT json_each.value AS coach FROM competitions, json_each(competitions.coaches_json) ORDER BY 1", conn)
+    try:
+        coaches_list = pd.read_sql_query("SELECT DISTINCT json_each.value AS coach FROM competitions, json_each(competitions.coaches_json) ORDER BY 1", conn)
+    except Exception:
+        coaches_list = pd.DataFrame({'coach': []})
     sel_coach = st.selectbox("Trener", options=["(odaberi)"] + coaches_list['coach'].fillna('').tolist()) if not coaches_list.empty else "(odaberi)"
     if sel_coach != "(odaberi)":
         dfc = pd.read_sql_query("""
@@ -648,7 +656,7 @@ def section_groups():
     st.subheader("Članovi i grupe")
     members_df = pd.read_sql_query("SELECT id, first_name || ' ' || last_name AS ime, COALESCE(group_name,'') AS grupa FROM members ORDER BY last_name, first_name", conn)
     all_groups = [""] + grp_df["grupa"].tolist()
-    sel_member = st.selectbox("Odaberi člana", options=members_df["ime"].tolist() if not members_df.empty else [])
+    sel_member = st.selectbox("Odaberi člana", options=members_df["ime"].tolist() if not members_df.empty else ["-"])
     if sel_member:
         current_group = members_df.loc[members_df['ime']==sel_member, 'grupa'].values[0]
         new_group = st.selectbox("Dodijeli u grupu", options=all_groups, index=all_groups.index(current_group) if current_group in all_groups else 0)
@@ -820,8 +828,8 @@ def section_attendance():
     if sessions.empty:
         st.info("Još nema treninga.")
         return
-    row_label = sessions.apply(lambda r: f"{r['datum']} {r['od'][:-3]}-{r['do'][:-3]} • {r['group_name']} ({r['trainer_name']})", axis=1).tolist()
-    idx = st.selectbox("Odaberi trening", options=list(range(len(row_label))), format_func=lambda i: row_label[i] if 0 <= i < len(row_label) else "")
+    row_label = sessions.apply(lambda r: f"{r['datum']} {str(r['od'])[:5]}-{str(r['do'])[:5]} • {r['group_name']} ({r['trainer_name']})", axis=1).tolist()
+    idx = st.selectbox("Odaberi trening", options=list(range(len(row_label))) if row_label else [0], format_func=lambda i: row_label[i] if row_label and 0 <= i < len(row_label) else "")
     sel_session = int(sessions.iloc[idx]["id"])
 
     # Članovi u grupi (plus ručno dodavanje)
