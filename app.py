@@ -110,7 +110,15 @@ def save_upload(file, subdir):
 
 def excel_bytes(df: pd.DataFrame, sheet="Sheet1"):
     out = io.BytesIO()
-    with pd.ExcelWriter(out, engine="xlsxwriter") as w:
+    # Prefer xlsxwriter if available (for best formatting performance),
+    # otherwise safely fall back to openpyxl so the app works even when
+    # xlsxwriter isn't installed.
+    try:
+        import xlsxwriter  # noqa: F401
+        engine = "xlsxwriter"
+    except Exception:
+        engine = "openpyxl"
+    with pd.ExcelWriter(out, engine=engine) as w:
         df.to_excel(w, index=False, sheet_name=sheet)
     return out.getvalue()
 
