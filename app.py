@@ -451,6 +451,41 @@ def section_stats():
     st.download_button("Skini statistiku (Excel)", data=excel_bytes(df, "Statistika"), file_name=f"stat_{year}.xlsx", disabled=df.empty)
     conn.close()
 
+    st.divider()
+    st.subheader("Grafovi")
+    # Po godinama – broj borbi i medalje
+    df_y = pd.read_sql_query("""SELECT substr(c.date_from,1,4) AS godina,
+        SUM(r.fights_total) AS borbi,
+        SUM(CASE WHEN r.placement=1 THEN 1 ELSE 0 END) AS zlato,
+        SUM(CASE WHEN r.placement=2 THEN 1 ELSE 0 END) AS srebro,
+        SUM(CASE WHEN r.placement=3 THEN 1 ELSE 0 END) AS bronca
+        FROM competitions c JOIN results r ON r.competition_id=c.id
+        GROUP BY substr(c.date_from,1,4)
+        ORDER BY godina""", conn)
+    if not df_y.empty:
+        st.bar_chart(df_y.set_index('godina')[['borbi']])
+        st.bar_chart(df_y.set_index('godina')[['zlato','srebro','bronca']])
+
+    # Po uzrastima
+    df_u = pd.read_sql_query("""SELECT c.age_cat AS uzrast,
+        SUM(r.wins) AS pobjede, SUM(r.losses) AS porazi
+        FROM competitions c JOIN results r ON r.competition_id=c.id
+        WHERE substr(c.date_from,1,4)=?
+        GROUP BY c.age_cat
+        ORDER BY c.age_cat""", conn, params=(str(year),))
+    if not df_u.empty:
+        st.bar_chart(df_u.set_index('uzrast')[['pobjede','porazi']])
+
+    # Po vrsti natjecanja
+    df_k = pd.read_sql_query("""SELECT c.kind AS natjecanje,
+        COUNT(DISTINCT c.id) AS broj_natjecanja,
+        SUM(CASE WHEN r.placement IN (1,2,3) THEN 1 ELSE 0 END) AS medalje
+        FROM competitions c JOIN results r ON r.competition_id=c.id
+        WHERE substr(c.date_from,1,4)=?
+        GROUP BY c.kind ORDER BY broj_natjecanja DESC""", conn, params=(str(year),))
+    if not df_k.empty:
+        st.bar_chart(df_k.set_index('natjecanje')[['broj_natjecanja','medalje']])
+
 # ---- App ----
 def main():
     st.set_page_config(page_title="HK Podravka – Admin", layout="wide")
@@ -487,6 +522,17 @@ def ensure_extra_tables(conn):
         end_dt TEXT,
         location TEXT,
         rep_prep INTEGER DEFAULT 0
+    )""")
+    # Raspored grupa s trenerima
+    cur.execute("""CREATE TABLE IF NOT EXISTS group_schedules (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        group_name TEXT,
+        coach_id INTEGER,
+        coach_name TEXT,
+        day_of_week INTEGER,  -- 0=Mon .. 6=Sun
+        start_time TEXT,  -- 'HH:MM'
+        end_time TEXT,
+        location TEXT
     )""")
     # Evidencija prisustva po članu
     cur.execute("""CREATE TABLE IF NOT EXISTS attendance (
@@ -683,7 +729,7 @@ def section_attendance():
 
     st.divider()
     # Statistika po mjesecima
-    st.subheader("Statistika (mjesec)")
+    st.subheader("Statistika (mjesec) – treninzi i sati")
     year = st.number_input("Godina", min_value=2020, max_value=datetime.datetime.now().year, value=datetime.datetime.now().year, step=1)
     month = st.number_input("Mjesec", min_value=1, max_value=12, value=datetime.datetime.now().month, step=1)
     stats_df = pd.read_sql_query("""
@@ -697,3 +743,6 @@ def section_attendance():
     total_hours = round(stats_df["sati"].sum(), 2) if not stats_df.empty else 0.0
     st.metric("Broj treninga", total_sessions)
     st.metric("Sati", total_hours)
+
+if __name__ == "__main__":
+    main()
