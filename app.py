@@ -456,12 +456,244 @@ def main():
     st.set_page_config(page_title="HK Podravka – Admin", layout="wide")
     css_style()
     init_db()
-    menu = st.sidebar.radio("Izbornik", ["Klub", "Članovi", "Treneri", "Natjecanja i rezultati", "Statistika"])
+    menu = st.sidebar.radio("Izbornik", ["Klub", "Članovi", "Treneri", "Natjecanja i rezultati", "Statistika", "Grupe", "Veterani", "Prisustvo"])
     if menu == "Klub": section_club()
     elif menu == "Članovi": section_members()
     elif menu == "Treneri": section_coaches()
     elif menu == "Natjecanja i rezultati": section_competitions()
-    else: section_stats()
+    elif menu == "Statistika": section_stats()
+    elif menu == "Grupe": section_groups()
+    elif menu == "Veterani": section_veterans()
+    else: section_attendance()
 
 if __name__ == "__main__":
     main()
+
+
+def ensure_extra_tables(conn):
+    cur = conn.cursor()
+    # Grupe
+    cur.execute("""CREATE TABLE IF NOT EXISTS groups (
+        name TEXT PRIMARY KEY,
+        description TEXT DEFAULT ''
+    )""")
+    # Trening sesije (prisustvo)
+    cur.execute("""CREATE TABLE IF NOT EXISTS training_sessions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        trainer_id INTEGER,
+        trainer_name TEXT,
+        group_name TEXT,
+        start_dt TEXT,
+        end_dt TEXT,
+        location TEXT,
+        rep_prep INTEGER DEFAULT 0
+    )""")
+    # Evidencija prisustva po članu
+    cur.execute("""CREATE TABLE IF NOT EXISTS attendance (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id INTEGER,
+        member_id INTEGER,
+        present INTEGER DEFAULT 1,
+        UNIQUE(session_id, member_id)
+    )""")
+    conn.commit()
+
+
+# ---- Sekcija: Grupe ----
+def section_groups():
+    st.header("Grupe")
+    conn = get_conn()
+    cur = conn.cursor()
+    # Forma za dodavanje/uređivanje grupa
+    st.subheader("Popis i uređivanje grupa")
+    with st.form("grp_form", clear_on_submit=True):
+        col1, col2 = st.columns([2,3])
+        with col1:
+            g_name = st.text_input("Naziv grupe")
+        with col2:
+            g_desc = st.text_input("Opis / napomena", "")
+        submitted = st.form_submit_button("Spremi grupu")
+        if submitted:
+            if g_name.strip():
+                cur.execute("INSERT OR REPLACE INTO groups (name, description) VALUES (?,?)", (g_name.strip(), g_desc.strip()))
+                conn.commit()
+                st.success("Grupa spremljena.")
+            else:
+                st.warning("Upišite naziv grupe.")
+    # Popis grupa
+    grp_df = pd.read_sql_query("SELECT name AS grupa, description AS opis FROM groups ORDER BY name", conn)
+    st.dataframe(grp_df, use_container_width=True)
+    st.divider()
+
+    # Dodjela članova u grupe i premještanje
+    st.subheader("Članovi i grupe")
+    members_df = pd.read_sql_query("SELECT id, first_name || ' ' || last_name AS ime, COALESCE(group_name,'') AS grupa FROM members ORDER BY last_name, first_name", conn)
+    all_groups = [""] + [g for g in grp_df["grupa"].tolist()]
+    sel_member = st.selectbox("Odaberi člana", options=members_df["ime"].tolist())
+    current_group = members_df.loc[members_df['ime']==sel_member, 'grupa'].values[0]
+    new_group = st.selectbox("Dodijeli u grupu", options=all_groups, index=all_groups.index(current_group) if current_group in all_groups else 0)
+    if st.button("Spremi dodjelu/premještanje"):
+        mem_id = int(members_df.loc[members_df['ime']==sel_member, 'id'].values[0])
+        cur.execute("UPDATE members SET group_name=? WHERE id=?", (new_group if new_group else None, mem_id))
+        conn.commit()
+        st.success("Član ažuriran.")
+        st.experimental_rerun()
+
+    # Excel export/import grupa
+    st.subheader("Excel import/export (grupe)")
+    export_df = pd.read_sql_query("SELECT first_name AS ime, last_name AS prezime, COALESCE(group_name,'') AS grupa FROM members ORDER BY last_name, first_name", conn)
+    excel_buf = io.BytesIO()
+    with pd.ExcelWriter(excel_buf, engine="xlsxwriter") as writer:
+        export_df.to_excel(writer, index=False, sheet_name="grupe")
+    st.download_button("Skini Excel grupe", data=excel_buf.getvalue(), file_name="grupe_export.xlsx")
+    up = st.file_uploader("Upload Excel grupe (kolone: ime, prezime, grupa)", type=["xlsx"], key="grupe_xlsx_up")
+    if up is not None:
+        try:
+            df_up = pd.read_excel(up)
+            for _, r in df_up.iterrows():
+                g = str(r.get("grupa","") or "").strip()
+                ime = str(r.get("ime","")).strip()
+                prez = str(r.get("prezime","")).strip()
+                if not ime or not prez:
+                    continue
+                # nađi člana
+                row = pd.read_sql_query("SELECT id FROM members WHERE first_name=? AND last_name=? LIMIT 1", conn, params=(ime, prez))
+                if not row.empty:
+                    mem_id = int(row.iloc[0]["id"])
+                    cur.execute("UPDATE members SET group_name=? WHERE id=?", (g if g else None, mem_id))
+            conn.commit()
+            st.success("Grupe su uvezene.")
+        except Exception as e:
+            st.error(f"Greška pri uvozu: {e}")
+
+
+# ---- Sekcija: Veterani ----
+def section_veterans():
+    st.header("Veterani")
+    conn = get_conn()
+    # filter veterana
+    df = pd.read_sql_query("""
+        SELECT id, first_name AS ime, last_name AS prezime, athlete_email AS email, parent_email AS email_roditelja,
+               phone AS telefon, group_name AS grupa
+        FROM members
+        WHERE COALESCE(veteran,0)=1
+        ORDER BY last_name, first_name
+    """, conn)
+    if df.empty:
+        st.info("Nema označenih veterana.")
+        return
+    st.dataframe(df.drop(columns=["id"]), use_container_width=True)
+    st.caption("Kliknite na ime u popisu članova za uređivanje u sekciji 'Članovi'.")
+
+    # Masovna obavijest – generiraj mailto i WhatsApp linkove
+    st.subheader("Slanje obavijesti")
+    emails = [e for e in (df["email"].dropna().tolist() + df["email_roditelja"].dropna().tolist()) if e]
+    unique_emails = sorted(set(emails))
+    if unique_emails:
+        mailto_link = "mailto:" + ",".join(unique_emails)
+        st.markdown(f"[Pošalji e-mail svima]({mailto_link})")
+    phones = [str(p) for p in df["telefon"].dropna().tolist() if str(p).strip()]
+    if phones:
+        # WhatsApp bulk open isn't standardized; provide first contact quick link
+        wa = f"https://wa.me/{phones[0]}"
+        st.markdown(f"[Otvori WhatsApp za prvi broj]({wa})")
+
+
+# ---- Sekcija: Prisustvo ----
+def section_attendance():
+    st.header("Prisustvo")
+    conn = get_conn()
+    cur = conn.cursor()
+
+    # Kreiranje treninga
+    st.subheader("Evidencija treninga")
+    # Treneri i grupe
+    coaches = pd.read_sql_query("SELECT id, first_name || ' ' || last_name AS ime FROM coaches ORDER BY last_name, first_name", conn)
+    groups = pd.read_sql_query("SELECT name FROM groups ORDER BY name", conn)
+    col = st.columns(2)
+    with col[0]:
+        trainer_name = st.selectbox("Trener", options=coaches["ime"].tolist() if not coaches.empty else ["-"], index=0)
+    with col[1]:
+        group_name = st.selectbox("Grupa", options=groups["name"].tolist() if not groups.empty else ["-"], index=0)
+
+    col2 = st.columns(3)
+    with col2[0]:
+        start_dt = st.datetime_input("Vrijeme početka", value=datetime.datetime.now().replace(minute=0, second=0, microsecond=0))
+    with col2[1]:
+        end_dt = st.datetime_input("Vrijeme završetka", value=datetime.datetime.now().replace(minute=0, second=0, microsecond=0) + datetime.timedelta(hours=1))
+    with col2[2]:
+        location = st.text_input("Lokacija", "")
+
+    rep_prep = st.checkbox("Pripreme reprezentacije", value=False)
+    if st.button("Spremi trening"):
+        if trainer_name == "-" or group_name == "-":
+            st.warning("Dodajte trenere i grupe prije spremanja.")
+        else:
+            # map trainer_name back to id (best-effort)
+            trow = coaches.loc[coaches['ime']==trainer_name]
+            trainer_id = int(trow['id'].values[0]) if not trow.empty else None
+            cur.execute("""INSERT INTO training_sessions (trainer_id, trainer_name, group_name, start_dt, end_dt, location, rep_prep)
+                           VALUES (?,?,?,?,?,?,?)""",
+                        (trainer_id, trainer_name, group_name, start_dt.isoformat(), end_dt.isoformat(), location, 1 if rep_prep else 0))
+            conn.commit()
+            st.success("Trening je spremljen.")
+
+    st.divider()
+
+    # Označavanje prisustva po treningu
+    st.subheader("Označavanje prisustva")
+    sessions = pd.read_sql_query("SELECT id, date(start_dt) AS datum, time(start_dt) AS od, time(end_dt) AS do, group_name, trainer_name, location FROM training_sessions ORDER BY start_dt DESC LIMIT 50", conn)
+    if sessions.empty:
+        st.info("Još nema treninga.")
+        return
+    row_label = sessions.apply(lambda r: f"{r['datum']} {r['od'][:-3]}-{r['do'][:-3]} • {r['group_name']} ({r['trainer_name']})", axis=1).tolist()
+    idx = st.selectbox("Odaberi trening", options=list(range(len(row_label))), format_func=lambda i: row_label[i] if 0 <= i < len(row_label) else "")
+    sel_session = int(sessions.iloc[idx]["id"])
+
+    # Članovi u grupi (plus ručno dodavanje)
+    grp = sessions.iloc[idx]["group_name"]
+    members = pd.read_sql_query("SELECT id, first_name || ' ' || last_name AS ime FROM members WHERE group_name=? ORDER BY last_name, first_name", conn, params=(grp,))
+    extra_member = st.text_input("Dodaj člana iz druge grupe (ime i prezime, točan zapis)")
+    if st.button("Dodaj dodatnog člana"):
+        if extra_member.strip():
+            row = pd.read_sql_query("SELECT id FROM members WHERE first_name || ' ' || last_name = ? LIMIT 1", conn, params=(extra_member.strip(),))
+            if not row.empty:
+                mem_id = int(row.iloc[0]["id"])
+                cur.execute("INSERT OR IGNORE INTO attendance (session_id, member_id, present) VALUES (?,?,1)", (sel_session, mem_id))
+                conn.commit()
+                st.success("Član dodan.")
+            else:
+                st.warning("Član nije pronađen.")
+
+    # Popis i kvačice prisustva
+    att_df = pd.read_sql_query("""
+        SELECT m.id AS member_id, m.first_name || ' ' || m.last_name AS ime,
+               COALESCE(a.present, 0) AS prisutan
+        FROM members m
+        LEFT JOIN attendance a ON a.member_id = m.id AND a.session_id = ?
+        WHERE m.group_name=?
+        ORDER BY m.last_name, m.first_name
+    """, conn, params=(sel_session, grp))
+    for _, r in att_df.iterrows():
+        val = st.checkbox(r["ime"], value=bool(r["prisutan"]))
+        # write through on toggle
+        cur.execute("INSERT OR IGNORE INTO attendance (session_id, member_id, present) VALUES (?,?,?)", (sel_session, int(r["member_id"]), 1 if val else 0))
+        cur.execute("UPDATE attendance SET present=? WHERE session_id=? AND member_id=?", (1 if val else 0, sel_session, int(r["member_id"])))
+    conn.commit()
+
+    st.divider()
+    # Statistika po mjesecima
+    st.subheader("Statistika (mjesec)")
+    year = st.number_input("Godina", min_value=2020, max_value=datetime.datetime.now().year, value=datetime.datetime.now().year, step=1)
+    month = st.number_input("Mjesec", min_value=1, max_value=12, value=datetime.datetime.now().month, step=1)
+    stats_df = pd.read_sql_query("""
+        SELECT date(start_dt) AS datum,
+               CAST((julianday(end_dt) - julianday(start_dt)) * 24.0 AS REAL) AS sati
+        FROM training_sessions
+        WHERE strftime('%Y', start_dt)=? AND strftime('%m', start_dt)=?
+        ORDER BY start_dt
+    """, conn, params=(str(year), f"{int(month):02d}"))
+    total_sessions = len(stats_df)
+    total_hours = round(stats_df["sati"].sum(), 2) if not stats_df.empty else 0.0
+    st.metric("Broj treninga", total_sessions)
+    st.metric("Sati", total_hours)
