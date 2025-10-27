@@ -1,727 +1,459 @@
-
-# app.py — Streamlit verzija Sekcija 1 (Klub) i 2 (Članovi)
-import os, json, datetime
-from pathlib import Path
-from io import BytesIO
+# -*- coding: utf-8 -*-
+"""
+HK Podravka – Admin aplikacija (čista verzija v7.1)
+Sekcije: Klub, Članovi, Treneri, Natjecanja i rezultati, Statistika
+Boje: crvena, bijela, zlatna
+"""
+import os, io, json, sqlite3
+from datetime import date, datetime
+import pandas as pd
 import streamlit as st
-from openpyxl import Workbook, load_workbook
-from reportlab.lib.pagesizes import A4
-from reportlab.pdfgen import canvas
 
-# --------------------- Inicijalizacija ---------------------
-st.set_page_config(page_title="HK Podravka – Admin", layout="wide")
+# ---- Boje i osnovni podaci ----
+PRIMARY_RED = "#c1121f"
+GOLD = "#d4af37"
+WHITE = "#ffffff"
 
-BASE_DIR = Path(__file__).resolve().parent
-DATA_DIR = BASE_DIR / "data"
-UPLOAD_DIR = BASE_DIR / "uploads"
-DOCS_DIR = UPLOAD_DIR / "docs"
-IMG_DIR = UPLOAD_DIR / "images"
-MEMBER_DIR = UPLOAD_DIR / "members"
-for p in [DATA_DIR, UPLOAD_DIR, DOCS_DIR, IMG_DIR, MEMBER_DIR]:
-    p.mkdir(parents=True, exist_ok=True)
+KLUB_NAZIV = "Hrvački klub Podravka"
+KLUB_EMAIL = "hsk-podravka@gmail.com"
+KLUB_ADRESA = "Miklinovec 6a, 48000 Koprivnica"
+KLUB_OIB = "60911784858"
+KLUB_WEB = "https://hk-podravka.com"
+KLUB_IBAN = "HR6923860021100518154"
 
-CLUB_JSON = DATA_DIR / "club.json"
-MEMBERS_JSON = DATA_DIR / "members.json"
+DB_PATH = "hk_podravka.db"
+UPLOAD_DIR = "uploads"
+os.makedirs(UPLOAD_DIR, exist_ok=True)
 
-ALLOWED_DOC = {".pdf", ".doc", ".docx", ".xls", ".xlsx", ".jpg", ".jpeg", ".png"}
-ALLOWED_IMG = {".jpg", ".jpeg", ".png", ".svg", ".webp"}
+# ---- DB util ----
+def get_conn():
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON")
+    return conn
 
-def load_json(path: Path, default):
-    if path.exists():
-        try:
-            return json.loads(path.read_text(encoding="utf-8"))
-        except:
-            return default
-    return default
+def init_db():
+    conn = get_conn()
+    cur = conn.cursor()
+    # club
+    cur.execute("""CREATE TABLE IF NOT EXISTS club_info (
+        id INTEGER PRIMARY KEY CHECK (id=1),
+        name TEXT, email TEXT, address TEXT, oib TEXT, web TEXT, iban TEXT,
+        president TEXT, secretary TEXT, board_json TEXT, supervisory_json TEXT,
+        instagram TEXT, facebook TEXT, tiktok TEXT
+    )""")
+    cur.execute("SELECT 1 FROM club_info WHERE id=1")
+    if cur.fetchone() is None:
+        cur.execute("""INSERT INTO club_info (id,name,email,address,oib,web,iban,president,secretary,board_json,supervisory_json,instagram,facebook,tiktok)
+                       VALUES (1,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                    (KLUB_NAZIV, KLUB_EMAIL, KLUB_ADRESA, KLUB_OIB, KLUB_WEB, KLUB_IBAN, "", "", "[]", "[]", "", "", ""))
+    # members
+    cur.execute("""CREATE TABLE IF NOT EXISTS members (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        first_name TEXT, last_name TEXT, dob TEXT, gender TEXT, oib TEXT UNIQUE,
+        street TEXT, city TEXT, postal_code TEXT,
+        athlete_email TEXT, parent_email TEXT,
+        id_card_number TEXT, id_card_issuer TEXT, id_card_valid_until TEXT,
+        passport_number TEXT, passport_issuer TEXT, passport_valid_until TEXT,
+        active_competitor INTEGER DEFAULT 0, veteran INTEGER DEFAULT 0, other_flag INTEGER DEFAULT 0,
+        pays_fee INTEGER DEFAULT 0, fee_amount REAL DEFAULT 30.0,
+        group_name TEXT, photo_path TEXT,
+        application_path TEXT, consent_path TEXT,
+        medical_path TEXT, medical_valid_until TEXT, consent_checked_date TEXT
+    )""")
+    # coaches
+    cur.execute("""CREATE TABLE IF NOT EXISTS coaches (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        first_name TEXT, last_name TEXT, dob TEXT, oib TEXT, email TEXT, iban TEXT,
+        group_name TEXT, contract_path TEXT, other_docs_json TEXT, photo_path TEXT
+    )""")
+    # competitions
+    cur.execute("""CREATE TABLE IF NOT EXISTS competitions (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        kind TEXT, kind_other TEXT, name TEXT,
+        date_from TEXT, date_to TEXT, place TEXT,
+        style TEXT, age_cat TEXT,
+        country TEXT, country_iso3 TEXT,
+        team_rank INTEGER, club_competitors INTEGER, total_competitors INTEGER,
+        clubs_count INTEGER, countries_count INTEGER,
+        coaches_json TEXT, notes TEXT, bulletin_url TEXT, website_link TEXT, gallery_paths_json TEXT
+    )""")
+    # results
+    cur.execute("""CREATE TABLE IF NOT EXISTS results (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        competition_id INTEGER REFERENCES competitions(id) ON DELETE CASCADE,
+        member_id INTEGER REFERENCES members(id) ON DELETE SET NULL,
+        category TEXT, style TEXT,
+        fights_total INTEGER, wins INTEGER, losses INTEGER, placement INTEGER,
+        wins_detail_json TEXT, losses_detail_json TEXT, note TEXT
+    )""")
+    conn.commit(); conn.close()
 
-def save_json(path: Path, data):
-    path.write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-
-def load_club():
-    return load_json(CLUB_JSON, {
-        "naziv": "HRVAČKI KLUB PODRAVKA",
-        "ulica_broj": "Miklinovec 6a",
-        "grad_postanski": "48000 Koprivnica",
-        "oib": "60911784858",
-        "iban": "HR6923860021100518154",
-        "email": "hsk-podravka@gmail.com",
-        "web": "https://hk-podravka.com",
-        "social": {"instagram": "", "facebook": "", "tiktok": ""},
-        "logo_path": "",
-        "predsjednik": {"ime_prezime": "", "telefon": "", "email": ""},
-        "tajnik": {"ime_prezime": "", "telefon": "", "email": ""},
-        "predsjednistvo": [],
-        "nadzorni_odbor": [],
-        "statut_path": "",
-        "ostali_dokumenti": []
-    })
-
-def save_club(data): save_json(CLUB_JSON, data)
-
-def load_members():
-    return load_json(MEMBERS_JSON, {"seq": 1, "items": []})
-
-def save_members(d): save_json(MEMBERS_JSON, d)
-
-def new_member_id(members):
-    mid = members["seq"]; members["seq"] += 1; return mid
-
-def safe_save(file, target_dir: Path):
-    if not file: return ""
-    name = Path(file.name)
-    ext = name.suffix.lower()
-    stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-    safe = f"{name.stem}_{stamp}{ext}"
-    out = target_dir / safe
-    out.write_bytes(file.read())
-    sub = "images" if target_dir == IMG_DIR else ("members" if target_dir == MEMBER_DIR else "docs")
-    return str(out)  # vraćamo putanju na disku; za download ćemo čitati i nuditi dugme
-
-def parse_date(s):
-    try: return datetime.datetime.strptime(s, "%Y-%m-%d").date()
-    except: return None
-
-def days_to(date_val):
-    if not date_val: return None
-    return (date_val - datetime.date.today()).days
-
-# -------- PDF generiranje --------
-def gen_pristupnica_pdf(member):
-    path = MEMBER_DIR / f"pristupnica_{member['id']}.pdf"
-    c = canvas.Canvas(str(path), pagesize=A4)
-    w, h = A4; top = h - 40
-    c.setFont("Helvetica-Bold", 14)
-    c.drawString(40, top, "PRISTUPNICA – HRVAČKI KLUB PODRAVKA")
-    c.setFont("Helvetica", 11)
-    c.drawString(40, top-20, f"Ime i prezime: {member.get('ime_prezime','')}")
-    c.drawString(40, top-38, f"Datum rođenja: {member.get('datum_rodjenja','')}")
-    c.drawString(40, top-56, f"OIB: {member.get('oib','')}")
-    text = c.beginText(40, top-90); text.setFont("Helvetica", 10)
-    paragraf = (
-        "HRVAČKI KLUB „PODRAVKA“ 48000 Koprivnica, Miklinovec 6a, mob:091/456-23-21 "
-        "web: www.hk-podravka.hr, e-mail: hsk.podravka@gmail.com\n\n"
-        "OIB:60911784858, žiro-račun: HR6923860021100518154\n\n"
-        "STATUT KLUBA - ČLANSTVO (čl. 14)... Cijeli Statut: www.hk-podravka.hr/o-klubu\n\n"
-        "PRESTANAK ČLANSTVA (čl. 21)... Istupnica: www.hk-podravka.hr/o-klubu\n\n"
-        "ČLANARINA JE OBVEZUJUĆA TIJEKOM CIJELE GODINE (12 MJESECI)...\n\n"
-        "IZJAVA O ODGOVORNOSTI – Hrvanje je borilački sport... Svojim potpisom suglasni smo...\n\n"
-        "POTPIS ČLANA: ______________________    POTPIS RODITELJA: ______________________\n"
-    )
-    for line in paragraf.split("\n"):
-        text.textLine(line)
-    c.drawText(text); c.showPage(); c.save()
-    return str(path)
-
-def gen_privola_pdf(member):
-    path = MEMBER_DIR / f"privola_{member['id']}.pdf"
-    c = canvas.Canvas(str(path), pagesize=A4)
-    w, h = A4; y = h - 40
-    c.setFont("Helvetica-Bold", 14); c.drawString(40, y, "PRIVOLA – obrada osobnih podataka (GDPR)")
-    y -= 24; c.setFont("Helvetica", 10); text = c.beginText(40, y)
-    paragraf = (
-        "Sukladno Zakonu i Uredbi (EU) 2016/679 (GDPR) dajem privolu da se moji podaci koriste "
-        "u svrhu vođenja Kluba i prijava na natjecanja, te objava na službenim stranicama i društvenim mrežama Kluba i nadležnih tijela.\n\n"
-        "U _____________________________ ; _____________ 20____\n"
-        f"Član kluba: {member.get('ime_prezime','')}\n"
-        "Potpis: ____________________\n"
-        "Roditelj/staratelj (ako je maloljetan): ____________________  Potpis: ____________________\n"
-    )
-    for line in paragraf.split("\n"):
-        text.textLine(line)
-    c.drawText(text); c.showPage(); c.save()
-    return str(path)
-
-# --------------------- UI ---------------------
-st.markdown(
-    """
+# ---- UI util ----
+def css_style():
+    st.markdown(f"""
     <style>
-    :root{ --primary:#d90429; --accent:#c9a227; }
-    .stButton>button{ background:var(--primary); color:white; border:0; }
-    .accent{ color:var(--accent); }
+      .app-header {{background: linear-gradient(90deg,{PRIMARY_RED},{GOLD}); color:{WHITE}; padding:14px 18px; border-radius:14px; margin-bottom:16px;}}
+      .stButton>button {{background:{PRIMARY_RED}; color:white; border-radius:10px;}}
     </style>
-    """, unsafe_allow_html=True
-)
+    """, unsafe_allow_html=True)
 
-tabs = st.tabs(["🏛️ Klub (Sekcija 1)", "👥 Članovi (Sekcija 2)"])
+def page_header(title, subtitle=None):
+    st.markdown(f"<div class='app-header'><h3 style='margin:0'>{title}</h3>{('<div>'+subtitle+'</div>') if subtitle else ''}</div>", unsafe_allow_html=True)
 
-# ===================== SEKCIJA 1 =====================
-with tabs[0]:
-    st.subheader("Osnovni podaci o klubu")
-    club = load_club()
+def save_upload(file, subdir):
+    if not file: return ""
+    path = os.path.join(UPLOAD_DIR, subdir); os.makedirs(path, exist_ok=True)
+    fname = f"{datetime.now().strftime('%Y%m%d_%H%M%S')}_{file.name}"
+    full = os.path.join(path, fname)
+    with open(full, "wb") as f: f.write(file.getbuffer())
+    return full
 
-    colL, colR = st.columns([2,1])
-    with colL:
-        st.markdown(f"**{club['naziv']}**  \n{club['ulica_broj']}, {club['grad_postanski']}  \nOIB: {club['oib']} · IBAN: {club['iban']}")
-    with colR:
-        if club.get("logo_path") and Path(club["logo_path"]).exists():
-            st.image(club["logo_path"], caption="Logo kluba", use_column_width=True)
+def excel_bytes(df: pd.DataFrame, sheet="Sheet1"):
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as w:
+        df.to_excel(w, index=False, sheet_name=sheet)
+    return out.getvalue()
 
-    with st.form("frm_club"):
-        c1, c2 = st.columns(2)
-        with c1:
-            club["naziv"] = st.text_input("Naziv kluba", club["naziv"])
-            club["ulica_broj"] = st.text_input("Ulica i kućni broj", club["ulica_broj"])
-            club["oib"] = st.text_input("OIB", club["oib"])
-            club["email"] = st.text_input("E-mail", club["email"])
-            club["social"]["instagram"] = st.text_input("Instagram URL", club["social"]["instagram"])
-            club["social"]["tiktok"] = st.text_input("TikTok URL", club["social"]["tiktok"])
-        with c2:
-            logo_f = st.file_uploader("Logo (jpg/png/svg/webp)", type=[e.replace(".","") for e in ALLOWED_IMG])
-            club["grad_postanski"] = st.text_input("Grad i poštanski broj", club["grad_postanski"])
-            club["iban"] = st.text_input("IBAN", club["iban"])
-            club["web"] = st.text_input("Web stranica", club["web"])
-            club["social"]["facebook"] = st.text_input("Facebook URL", club["social"]["facebook"])
+def mailto(to, subject="", body=""):
+    import urllib.parse as up
+    q = {}
+    if subject: q["subject"]=subject
+    if body: q["body"]=body
+    qp = up.urlencode(q)
+    return f"mailto:{to}?{qp}" if qp else f"mailto:{to}"
 
-        st.markdown("### Vodstvo kluba")
-        pcol1, pcol2, pcol3 = st.columns(3)
-        with pcol1:
-            club["predsjednik"]["ime_prezime"] = st.text_input("Predsjednik – Ime i prezime", club["predsjednik"]["ime_prezime"])
-            club["tajnik"]["ime_prezime"] = st.text_input("Tajnik – Ime i prezime", club["tajnik"]["ime_prezime"])
-        with pcol2:
-            club["predsjednik"]["telefon"] = st.text_input("Predsjednik – Kontakt", club["predsjednik"]["telefon"])
-            club["tajnik"]["telefon"] = st.text_input("Tajnik – Kontakt", club["tajnik"]["telefon"])
-        with pcol3:
-            club["predsjednik"]["email"] = st.text_input("Predsjednik – E-mail", club["predsjednik"]["email"])
-            club["tajnik"]["email"] = st.text_input("Tajnik – E-mail", club["tajnik"]["email"])
+# ---- Sekcija 1: Klub ----
+def section_club():
+    page_header("Klub – osnovni podaci", KLUB_NAZIV)
+    conn = get_conn()
+    df = pd.read_sql_query("SELECT * FROM club_info WHERE id=1", conn)
+    row = df.iloc[0]
+    def _df(js):
+        try:
+            d = pd.read_json(js)
+            if isinstance(d, pd.DataFrame): return d
+        except Exception: ...
+        return pd.DataFrame(columns=["ime_prezime","telefon","email"])
+    board_pref = _df(row.get("board_json","[]"))
+    sup_pref = _df(row.get("supervisory_json","[]"))
+    with st.form("club_form_v7_1"):
+        c1,c2 = st.columns(2)
+        name = c1.text_input("KLUB (IME)", row["name"] or "")
+        address = c1.text_input("ULICA I KUĆNI BROJ, GRAD I POŠTANSKI BROJ", row["address"] or "")
+        email = c1.text_input("E-mail", row["email"] or "")
+        web = c1.text_input("Web stranica", row["web"] or "")
+        iban = c1.text_input("IBAN račun", row["iban"] or "")
+        oib = c1.text_input("OIB", row["oib"] or "")
+        president = c2.text_input("Predsjednik kluba", row["president"] or "")
+        secretary = c2.text_input("Tajnik kluba", row["secretary"] or "")
+        st.markdown("**Članovi predsjedništva** (ime, telefon, e-mail)")
+        board = st.data_editor(board_pref if not board_pref.empty else pd.DataFrame(columns=["ime_prezime","telefon","email"]),
+                               num_rows="dynamic", key="board_v7_1")
+        st.markdown("**Nadzorni odbor** (ime, telefon, e-mail)")
+        superv = st.data_editor(sup_pref if not sup_pref.empty else pd.DataFrame(columns=["ime_prezime","telefon","email"]),
+                                num_rows="dynamic", key="sup_v7_1")
+        s1,s2,s3 = st.columns(3)
+        instagram = s1.text_input("Instagram", row["instagram"] or "")
+        facebook = s2.text_input("Facebook", row["facebook"] or "")
+        tiktok = s3.text_input("TikTok", row["tiktok"] or "")
+        st.markdown("**Dokumenti**")
+        up_statut = st.file_uploader("Statut (PDF)", type=["pdf"], key="statut_v7_1")
+        up_other = st.file_uploader("Ostali dokument (PDF/IMG)", type=["pdf","png","jpg","jpeg"], key="doc_v7_1")
+        submitted = st.form_submit_button("Spremi")
+    if submitted:
+        conn.execute("""UPDATE club_info SET name=?,email=?,address=?,oib=?,web=?,iban=?,president=?,secretary=?,board_json=?,supervisory_json=?,instagram=?,facebook=?,tiktok=? WHERE id=1""",
+                     (name,email,address,oib,web,iban,president,secretary,
+                      (board if isinstance(board,pd.DataFrame) else pd.DataFrame(board)).to_json(),
+                      (superv if isinstance(superv,pd.DataFrame) else pd.DataFrame(superv)).to_json(),
+                      instagram,facebook,tiktok))
+        conn.execute("""CREATE TABLE IF NOT EXISTS club_docs (id INTEGER PRIMARY KEY AUTOINCREMENT, kind TEXT, filename TEXT, path TEXT, uploaded_at TEXT)""")
+        if up_statut:
+            p = save_upload(up_statut,"club_docs")
+            conn.execute("INSERT INTO club_docs(kind,filename,path,uploaded_at) VALUES (?,?,?,?)", ("statut", up_statut.name, p, datetime.now().isoformat()))
+        if up_other:
+            p = save_upload(up_other,"club_docs")
+            conn.execute("INSERT INTO club_docs(kind,filename,path,uploaded_at) VALUES (?,?,?,?)", ("ostalo", up_other.name, p, datetime.now().isoformat()))
+        conn.commit(); st.success("Spremljeno.")
+    try:
+        docs = pd.read_sql_query("SELECT id, kind, filename, uploaded_at FROM club_docs ORDER BY uploaded_at DESC", conn)
+        if not docs.empty: st.dataframe(docs, use_container_width=True)
+    except Exception:
+        pass
+    conn.close()
 
-        st.markdown("#### Članovi predsjedništva")
-        p_count = st.number_input("Broj članova predsjedništva", min_value=0, value=max(1, len(club["predsjednistvo"]) or 1), step=1)
-        pres = club["predsjednistvo"] + [{}]*max(0, p_count - len(club["predsjednistvo"]))
-        new_pres = []
-        for i in range(int(p_count)):
-            a,b,c = st.columns(3)
-            with a:
-                ime = st.text_input(f"[P{i+1}] Ime i prezime", pres[i].get("ime_prezime",""))
-            with b:
-                tel = st.text_input(f"[P{i+1}] Kontakt", pres[i].get("telefon",""))
-            with c:
-                eml = st.text_input(f"[P{i+1}] E-mail", pres[i].get("email",""))
-            if any([ime,tel,eml]): new_pres.append({"ime_prezime": ime, "telefon": tel, "email": eml})
-        club["predsjednistvo"] = new_pres
+# ---- Sekcija 2: Članovi ----
+def members_template_df():
+    return pd.DataFrame(columns=[
+        "ime","prezime","datum_rodenja(YYYY-MM-DD)","spol(M/Ž)","oib",
+        "ulica_i_broj","grad","postanski_broj",
+        "email_sportasa","email_roditelja",
+        "br_osobne","osobna_vrijedi_do(YYYY-MM-DD)","osobna_izdavatelj",
+        "br_putovnice","putovnica_vrijedi_do(YYYY-MM-DD)","putovnica_izdavatelj",
+        "aktivni_natjecatelj(0/1)","veteran(0/1)","ostalo(0/1)",
+        "placa_clanarinu(0/1)","iznos_clanarine(EUR)","grupa"
+    ])
 
-        st.markdown("#### Nadzorni odbor")
-        n_count = st.number_input("Broj članova nadzornog odbora", min_value=0, value=max(1, len(club["nadzorni_odbor"]) or 1), step=1)
-        nad = club["nadzorni_odbor"] + [{}]*max(0, n_count - len(club["nadzorni_odbor"]))
-        new_nad = []
-        for i in range(int(n_count)):
-            a,b,c = st.columns(3)
-            with a:
-                ime = st.text_input(f"[N{i+1}] Ime i prezime", nad[i].get("ime_prezime",""))
-            with b:
-                tel = st.text_input(f"[N{i+1}] Kontakt", nad[i].get("telefon",""))
-            with c:
-                eml = st.text_input(f"[N{i+1}] E-mail", nad[i].get("email",""))
-            if any([ime,tel,eml]): new_nad.append({"ime_prezime": ime, "telefon": tel, "email": eml})
-        club["nadzorni_odbor"] = new_nad
+def section_members():
+    page_header("Članovi", "Uvoz/izvoz Excel, unos i uređivanje")
+    conn = get_conn()
+    st.download_button("Predložak (Excel)", data=excel_bytes(members_template_df(),"ClanoviPredlozak"), file_name="predlozak_clanovi.xlsx")
+    export_df = pd.read_sql_query("""SELECT first_name AS ime, last_name AS prezime, dob AS datum_rodenja, gender AS spol, oib,
+        street AS ulica_i_broj, city AS grad, postal_code AS postanski_broj,
+        athlete_email AS email_sportasa, parent_email AS email_roditelja,
+        id_card_number AS br_osobne, id_card_valid_until AS osobna_vrijedi_do, id_card_issuer AS osobna_izdavatelj,
+        passport_number AS br_putovnice, passport_valid_until AS putovnica_vrijedi_do, passport_issuer AS putovnica_izdavatelj,
+        active_competitor AS aktivni_natjecatelj, veteran, other_flag AS ostalo,
+        pays_fee AS placa_clanarinu, fee_amount AS iznos_clanarine, group_name AS grupa
+        FROM members ORDER BY last_name, first_name""", conn)
+    st.download_button("Skini članove (Excel)", data=excel_bytes(export_df,"Clanovi"), file_name="clanovi_export.xlsx", disabled=export_df.empty)
 
-        st.markdown("### Dokumenti")
-        statut_f = st.file_uploader("Statut (PDF)", type=["pdf"])
-        ostali_f = st.file_uploader("Ostali dokumenti", type=[e.replace(".","") for e in ALLOWED_DOC], accept_multiple_files=True)
-
-        saved = st.form_submit_button("💾 Spremi")
-        if saved:
-            if logo_f: club["logo_path"] = safe_save(logo_f, IMG_DIR)
-            if statut_f: club["statut_path"] = safe_save(statut_f, DOCS_DIR)
-            if ostali_f:
-                arr = club.get("ostali_dokumenti", [])
-                for f in ostali_f:
-                    arr.append(safe_save(f, DOCS_DIR))
-                club["ostali_dokumenti"] = arr
-            save_club(club)
-            st.success("Osnovni podaci spremljeni.")
-
-    st.markdown("**Pregled spremljenih dokumenata**")
-    if club.get("statut_path") and Path(club["statut_path"]).exists():
-        with open(club["statut_path"], "rb") as fh:
-            st.download_button("📥 Preuzmi Statut", data=fh.read(), file_name=Path(club["statut_path"]).name)
-    if club.get("ostali_dokumenti"):
-        for p in club["ostali_dokumenti"]:
-            pth = Path(p)
-            if pth.exists():
-                with open(pth, "rb") as fh:
-                    st.download_button(f"📥 {pth.name}", data=fh.read(), file_name=pth.name, key=f"dl_{pth.name}")
-
-# ===================== SEKCIJA 2 =====================
-with tabs[1]:
-    st.subheader("Članovi")
-
-    members = load_members()
-
-    with st.expander("➕ Dodaj/uredi člana", expanded=True):
-        with st.form("frm_member"):
-            c1,c2,c3 = st.columns(3)
-            with c1:
-                ime = st.text_input("Ime i prezime")
-                dat = st.date_input("Datum rođenja", format="YYYY-MM-DD")
-                spol = st.selectbox("Spol", ["","m","ž"], index=0)
-                oib = st.text_input("OIB")
-                mjesto = st.text_input("Mjesto prebivališta")
-                slika_f = st.file_uploader("Fotografija", type=[e.replace(".","") for e in ALLOWED_IMG])
-            with c2:
-                em_s = st.text_input("E-mail sportaša")
-                em_r = st.text_input("E-mail roditelja")
-                osob_br = st.text_input("Osobna iskaznica – broj")
-                osob_vd = st.date_input("Osobna vrijedi do", value=None, format="YYYY-MM-DD")
-                osob_izd = st.text_input("Osobnu izdao")
-                prist_upl = st.file_uploader("Pristupnica (upload)", type=[e.replace(".","") for e in ALLOWED_DOC])
-                priv_upl = st.file_uploader("Privola (upload)", type=[e.replace(".","") for e in ALLOWED_DOC])
-            with c3:
-                put_br = st.text_input("Putovnica – broj")
-                put_vd = st.date_input("Putovnica vrijedi do", value=None, format="YYYY-MM-DD")
-                put_izd = st.text_input("Putovnicu izdao")
-                grupa = st.selectbox("Grupa", ["","Hrvači","Hrvačice","Veterani","Ostalo"])
-                aktivan = st.checkbox("Aktivni natjecatelj/ica", value=False)
-                veteran = st.checkbox("Veteran", value=False)
-                ostalo = st.checkbox("Ostalo", value=False)
-                placa = st.checkbox("Plaća članarinu", value=True)
-                iznos = st.number_input("Iznos članarine (€)", min_value=0.0, value=30.0, step=1.0)
-                lij_vd = st.date_input("Liječnička vrijedi do", value=None, format="YYYY-MM-DD")
-                lij_upl = st.file_uploader("Liječnička potvrda (upload)", type=[e.replace(".","") for e in ALLOWED_DOC])
-
-            submit = st.form_submit_button("💾 Spremi člana")
-            if submit:
-                mid = new_member_id(members)
-                mem = {
-                    "id": mid,
-                    "ime_prezime": ime.strip(),
-                    "datum_rodjenja": dat.isoformat() if dat else "",
-                    "spol": spol or "",
-                    "oib": oib.strip(),
-                    "mjesto": mjesto.strip(),
-                    "email_sportas": em_s.strip(),
-                    "email_roditelj": em_r.strip(),
-                    "osobna_broj": osob_br.strip(),
-                    "osobna_vrijedi_do": osob_vd.isoformat() if osob_vd else "",
-                    "osobna_izdao": osob_izd.strip(),
-                    "putovnica_broj": put_br.strip(),
-                    "putovnica_vrijedi_do": put_vd.isoformat() if put_vd else "",
-                    "putovnica_izdao": put_izd.strip(),
-                    "aktivan_natjecatelj": bool(aktivan),
-                    "veteran": bool(veteran),
-                    "ostalo": bool(ostalo),
-                    "placa_clanarinu": bool(placa),
-                    "iznos_clanarine": float(iznos),
-                    "grupa": grupa or "",
-                    "slika_path": "",
-                    "pristupnica_pdf": "",
-                    "privola_pdf": "",
-                    "pristupnica_upload": "",
-                    "privola_upload": "",
-                    "lijecnicka_upload": "",
-                    "lijecnicka_vrijedi_do": lij_vd.isoformat() if lij_vd else "",
-                    "datum_pristupa": datetime.date.today().isoformat(),
+    up_excel = st.file_uploader("Upload članova (Excel po predlošku)", type=["xlsx"], key="members_excel_v7_1")
+    if up_excel is not None:
+        try:
+            df_up = pd.read_excel(up_excel)
+            for _, r in df_up.iterrows():
+                vals = {
+                    "first_name": str(r.get("ime","") or ""),
+                    "last_name" : str(r.get("prezime","") or ""),
+                    "dob"       : str(r.get("datum_rodenja(YYYY-MM-DD)","") or "")[:10],
+                    "gender"    : str(r.get("spol(M/Ž)","") or ""),
+                    "oib"       : str(r.get("oib","") or ""),
+                    "street"    : str(r.get("ulica_i_broj","") or ""),
+                    "city"      : str(r.get("grad","") or ""),
+                    "postal"    : str(r.get("postanski_broj","") or ""),
+                    "email_s"   : str(r.get("email_sportasa","") or ""),
+                    "email_p"   : str(r.get("email_roditelja","") or ""),
+                    "id_no"     : str(r.get("br_osobne","") or ""),
+                    "id_until"  : str(r.get("osobna_vrijedi_do(YYYY-MM-DD)","") or "")[:10],
+                    "id_issuer" : str(r.get("osobna_izdavatelj","") or ""),
+                    "pass_no"   : str(r.get("br_putovnice","") or ""),
+                    "pass_until": str(r.get("putovnica_vrijedi_do(YYYY-MM-DD)","") or "")[:10],
+                    "pass_issuer":str(r.get("putovnica_izdavatelj","") or ""),
+                    "active"    : int(r.get("aktivni_natjecatelj(0/1)",0) or 0),
+                    "veteran"   : int(r.get("veteran(0/1)",0) or 0),
+                    "other"     : int(r.get("ostalo(0/1)",0) or 0),
+                    "pays"      : int(r.get("placa_clanarinu(0/1)",0) or 0),
+                    "fee"       : float(r.get("iznos_clanarine(EUR)",30) or 30.0),
+                    "group"     : str(r.get("grupa","") or ""),
                 }
-                if slika_f: mem["slika_path"] = safe_save(slika_f, MEMBER_DIR)
-                if prist_upl: mem["pristupnica_upload"] = safe_save(prist_upl, MEMBER_DIR)
-                if priv_upl: mem["privola_upload"] = safe_save(priv_upl, MEMBER_DIR)
-                if lij_upl: mem["lijecnicka_upload"] = safe_save(lij_upl, MEMBER_DIR)
+                conn.execute("""
+                    INSERT INTO members(first_name,last_name,dob,gender,oib,street,city,postal_code,
+                        athlete_email,parent_email,id_card_number,id_card_issuer,id_card_valid_until,
+                        passport_number,passport_issuer,passport_valid_until,
+                        active_competitor,veteran,other_flag,pays_fee,fee_amount,group_name)
+                    VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                    ON CONFLICT(oib) DO UPDATE SET
+                        first_name=excluded.first_name,last_name=excluded.last_name,dob=excluded.dob,gender=excluded.gender,
+                        street=excluded.street,city=excluded.city,postal_code=excluded.postal_code,
+                        athlete_email=excluded.athlete_email,parent_email=excluded.parent_email,
+                        id_card_number=excluded.id_card_number,id_card_issuer=excluded.id_card_issuer,id_card_valid_until=excluded.id_card_valid_until,
+                        passport_number=excluded.passport_number,passport_issuer=excluded.passport_issuer,passport_valid_until=excluded.passport_valid_until,
+                        active_competitor=excluded.active_competitor,veteran=excluded.veteran,other_flag=excluded.other_flag,
+                        pays_fee=excluded.pays_fee,fee_amount=excluded.fee_amount,group_name=excluded.group_name
+                """, (vals["first_name"],vals["last_name"],vals["dob"],vals["gender"],vals["oib"],vals["street"],vals["city"],vals["postal"],
+                      vals["email_s"],vals["email_p"],vals["id_no"],vals["id_issuer"],vals["id_until"],
+                      vals["pass_no"],vals["pass_issuer"],vals["pass_until"],vals["active"],vals["veteran"],vals["other"],vals["pays"],vals["fee"],vals["group"]))
+            conn.commit(); st.success("Excel uvoz dovršen.")
+        except Exception as e:
+            st.error(f"Greška pri uvozu: {e}")
 
-                members["items"].append(mem)
-                save_members(members)
+    st.markdown("---"); st.markdown("### Unos novog člana")
+    with st.form("member_form_v7_1"):
+        c1,c2,c3 = st.columns(3)
+        first_name = c1.text_input("Ime"); last_name = c2.text_input("Prezime"); dob = c3.date_input("Datum rođenja", value=date(2010,1,1))
+        gender = c1.selectbox("Spol", ["","M","Ž"]); oib = c2.text_input("OIB")
+        a1,a2,a3 = st.columns(3); street = a1.text_input("Ulica i kućni broj"); city = a2.text_input("Grad"); postal = a3.text_input("Poštanski broj")
+        e1,e2 = st.columns(2); email_s = e1.text_input("E-mail sportaša"); email_p = e2.text_input("E-mail roditelja")
+        id1,id2,id3 = st.columns(3); id_no = id1.text_input("Broj osobne"); id_until = id2.date_input("Osobna vrijedi do", value=date.today()); id_issuer = id3.text_input("Izdavatelj osobne")
+        p1,p2,p3 = st.columns(3); pass_no = p1.text_input("Broj putovnice"); pass_until = p2.date_input("Putovnica vrijedi do", value=date.today()); pass_issuer = p3.text_input("Izdavatelj putovnice")
+        s1,s2,s3 = st.columns(3); active = s1.checkbox("Aktivni natjecatelj/ica"); veteran = s2.checkbox("Veteran"); other = s3.checkbox("Ostalo")
+        pays_fee = st.checkbox("Plaća članarinu"); fee_amt = st.number_input("Iznos članarine (EUR)", value=30.0, step=1.0)
+        group_name = st.selectbox("Grupa", ["","Hrvači","Hrvačice","Veterani","Ostalo"])
+        photo = st.file_uploader("Slika člana", type=["png","jpg","jpeg"])
+        app_pdf = st.file_uploader("Pristupnica (PDF)", type=["pdf"]); con_pdf = st.file_uploader("Privola (PDF)", type=["pdf"])
+        up_med = st.file_uploader("Liječnička potvrda (PDF/JPG)", type=["pdf","png","jpg","jpeg"]); med_valid = st.date_input("Potvrda vrijedi do", value=date.today())
+        submit_member = st.form_submit_button("Spremi člana")
+    if submit_member:
+        photo_path = save_upload(photo, "members/photos")
+        app_path = save_upload(app_pdf, "members/forms")
+        con_path = save_upload(con_pdf, "members/forms")
+        med_path = save_upload(up_med, "members/medical")
+        conn.execute("""
+            INSERT INTO members(first_name,last_name,dob,gender,oib,street,city,postal_code,athlete_email,parent_email,
+                id_card_number,id_card_issuer,id_card_valid_until,passport_number,passport_issuer,passport_valid_until,
+                active_competitor,veteran,other_flag,pays_fee,fee_amount,group_name,photo_path,application_path,consent_path,medical_path,medical_valid_until,consent_checked_date)
+            VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+            ON CONFLICT(oib) DO UPDATE SET
+                first_name=excluded.first_name,last_name=excluded.last_name,dob=excluded.dob,gender=excluded.gender,
+                street=excluded.street,city=excluded.city,postal_code=excluded.postal_code,
+                athlete_email=excluded.athlete_email,parent_email=excluded.parent_email,
+                id_card_number=excluded.id_card_number,id_card_issuer=excluded.id_card_issuer,id_card_valid_until=excluded.id_card_valid_until,
+                passport_number=excluded.passport_number,passport_issuer=excluded.passport_issuer,passport_valid_until=excluded.passport_valid_until,
+                active_competitor=excluded.active_competitor,veteran=excluded.veteran,other_flag=excluded.other_flag,
+                pays_fee=excluded.pays_fee,fee_amount=excluded.fee_amount,group_name=excluded.group_name,
+                photo_path=COALESCE(excluded.photo_path,photo_path),
+                application_path=COALESCE(excluded.application_path,application_path),
+                consent_path=COALESCE(excluded.consent_path,consent_path),
+                medical_path=COALESCE(excluded.medical_path,medical_path),
+                medical_valid_until=excluded.medical_valid_until,
+                consent_checked_date=excluded.consent_checked_date
+        """, (first_name,last_name,dob.isoformat(),gender,oib,street,city,postal,email_s,email_p,id_no,id_issuer,id_until.isoformat(),
+              pass_no,pass_issuer,pass_until.isoformat(),int(active),int(veteran),int(other),int(pays_fee),float(fee_amt),group_name,
+              photo_path,app_path,con_path,med_path,med_valid.isoformat(), datetime.now().date().isoformat()))
+        conn.commit(); st.success("Član spremljen.")
 
-                # Generiraj PDF-ove
-                mem["pristupnica_pdf"] = gen_pristupnica_pdf(mem)
-                mem["privola_pdf"] = gen_privola_pdf(mem)
-                save_members(members)
+    st.markdown("---"); st.markdown("### Popis članova")
+    members_df = pd.read_sql_query("""SELECT id, first_name, last_name, gender, dob, oib, street, city, postal_code, athlete_email, parent_email,
+        group_name, pays_fee, fee_amount, medical_valid_until FROM members ORDER BY last_name, first_name""", conn)
+    if not members_df.empty:
+        edited = st.data_editor(members_df, num_rows="dynamic", use_container_width=True, key="members_grid_v7_1")
+        c1,c2,c3 = st.columns(3)
+        if c1.button("Spremi izmjene"):
+            for _, r in edited.iterrows():
+                conn.execute("""UPDATE members SET first_name=?,last_name=?,gender=?,dob=?,street=?,city=?,postal_code=?,athlete_email=?,parent_email=?,group_name=?,pays_fee=?,fee_amount=?,medical_valid_until=? WHERE id=?""",
+                             (str(r.get("first_name","")),str(r.get("last_name","")),str(r.get("gender","")),str(r.get("dob",""))[:10],
+                              str(r.get("street","")),str(r.get("city","")),str(r.get("postal_code","")),
+                              str(r.get("athlete_email","")),str(r.get("parent_email","")),
+                              str(r.get("group_name","")),int(r.get("pays_fee",0) or 0),float(r.get("fee_amount",0) or 0.0),
+                              str(r.get("medical_valid_until","")),int(r["id"])))
+            conn.commit(); st.success("Izmjene spremljene.")
+        del_id = c2.number_input("ID člana za brisanje", min_value=0, step=1, value=0)
+        if c3.button("Obriši člana") and del_id>0:
+            conn.execute("DELETE FROM members WHERE id=?", (int(del_id),)); conn.commit(); st.success("Član obrisan."); st.rerun()
+    conn.close()
 
-                st.success("Član spremljen. Generirane su PDF Pristupnica i Privola.")
+# ---- Sekcija 3: Treneri ----
+def section_coaches():
+    page_header("Treneri", "Unos trenera, dokumenti i slike")
+    conn = get_conn()
+    with st.form("coach_form_v7_1"):
+        c1,c2,c3 = st.columns(3)
+        first_name = c1.text_input("Ime"); last_name = c2.text_input("Prezime"); dob = c3.date_input("Datum rođenja", value=date(1990,1,1))
+        oib = c1.text_input("OIB"); email = c2.text_input("E-mail"); iban = c3.text_input("IBAN broj računa")
+        group_name = st.text_input("Grupa koju trenira (može se mijenjati)")
+        contract = st.file_uploader("Ugovor s klubom (PDF)", type=["pdf"])
+        other_docs = st.file_uploader("Drugi dokumenti (višestruko)", type=["pdf","png","jpg","jpeg"], accept_multiple_files=True)
+        photo = st.file_uploader("Slika trenera", type=["png","jpg","jpeg"])
+        submit = st.form_submit_button("Spremi trenera")
+    if submit:
+        def up(f, sub): return save_upload(f, sub) if f else ""
+        contract_path = up(contract, "coaches/contracts")
+        other_paths = [up(f,"coaches/docs") for f in (other_docs or [])]
+        photo_path = up(photo, "coaches/photos")
+        conn.execute("""INSERT INTO coaches(first_name,last_name,dob,oib,email,iban,group_name,contract_path,other_docs_json,photo_path)
+                        VALUES(?,?,?,?,?,?,?,?,?,?)""",
+                     (first_name,last_name,dob.isoformat(),oib,email,iban,group_name,contract_path,json.dumps(other_paths),photo_path))
+        conn.commit(); st.success("Trener spremljen.")
+    st.markdown("---"); st.markdown("### Popis trenera")
+    coaches_df = pd.read_sql_query("""SELECT id, first_name, last_name, dob, oib, email, iban, group_name FROM coaches ORDER BY last_name, first_name""", conn)
+    if not coaches_df.empty:
+        edited = st.data_editor(coaches_df, num_rows="dynamic", use_container_width=True, key="coaches_grid_v7_1")
+        c1,c2,c3 = st.columns(3)
+        if c1.button("Spremi izmjene (treneri)"):
+            for _, r in edited.iterrows():
+                conn.execute("""UPDATE coaches SET first_name=?, last_name=?, dob=?, oib=?, email=?, iban=?, group_name=? WHERE id=?""",
+                             (str(r.get("first_name","")),str(r.get("last_name","")),str(r.get("dob",""))[:10],str(r.get("oib","")),str(r.get("email","")),str(r.get("iban","")),str(r.get("group_name","")),int(r["id"])))
+            conn.commit(); st.success("Izmjene spremljene.")
+        del_id = c2.number_input("ID za brisanje", min_value=0, step=1, value=0)
+        if c3.button("Obriši trenera") and del_id>0:
+            conn.execute("DELETE FROM coaches WHERE id=?", (int(del_id),)); conn.commit(); st.success("Trener obrisan."); st.rerun()
+    conn.close()
 
-    st.markdown("---")
-    # Predložak i uvoz/izvoz Excela
+# ---- Sekcija 4: Natjecanja i rezultati ----
+def section_competitions():
+    page_header("Natjecanja i rezultati", "Unos natjecanja + rezultata")
+    conn = get_conn()
+    kind = st.selectbox("Vrsta", ["PRVENSTVO HRVATSKE","MEĐUNARODNI TURNIR","REPREZENTATIVNI NASTUP","HRVAČKA LIGA ZA SENIORE","MEĐUNARODNA HRVAČKA LIGA ZA KADETE","REGIONALNO PRVENSTVO","LIGA ZA DJEVOJČICE","OSTALO"])
+    kind_other = st.text_input("Druga vrsta", "") if kind=="OSTALO" else ""
+    name = st.text_input("Ime natjecanja (ako postoji)", "")
     c1,c2,c3 = st.columns(3)
-    with c1:
-        if st.button("📄 Preuzmi Excel predložak"):
-            wb = Workbook(); ws = wb.active; ws.title = "Clanovi"
-            headers = [
-                "ime_prezime","datum_rodjenja(YYYY-MM-DD)","spol(m/ž)","oib","mjesto",
-                "email_sportas","email_roditelj",
-                "osobna_broj","osobna_vrijedi_do(YYYY-MM-DD)","osobna_izdao",
-                "putovnica_broj","putovnica_vrijedi_do(YYYY-MM-DD)","putovnica_izdao",
-                "aktivan_natjecatelj(da/ne)","veteran(da/ne)","ostalo(da/ne)",
-                "placa_clanarinu(da/ne)","iznos_clanarine(decimal)","grupa",
-                "lijecnicka_vrijedi_do(YYYY-MM-DD)"
-            ]
-            ws.append(headers)
-            bio = BytesIO(); wb.save(bio); bio.seek(0)
-            st.download_button("⬇️ Spremi predložak", data=bio.getvalue(),
-                               file_name="predlozak_clanovi.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               key="dl_tpl")
-    with c2:
-        upl = st.file_uploader("Uvezi članove (.xlsx)", type=["xlsx"], key="upl_xlsx")
-        if upl and st.button("📥 Uvoz .xlsx"):
-            wb = load_workbook(upl); ws = wb.active
-            rows = list(ws.iter_rows(values_only=True))
-            if rows:
-                header = [str(h).strip() if h is not None else "" for h in rows[0]]
-                idx = {h:i for i,h in enumerate(header)}
-                def val(row, key):
-                    i = idx.get(key, None)
-                    return (str(row[i]).strip() if i is not None and row[i] is not None else "")
-                count=0
-                for row in rows[1:]:
-                    if not row: continue
-                    name = val(row,"ime_prezime")
-                    if not name: continue
-                    m = {
-                        "id": new_member_id(members),
-                        "ime_prezime": name,
-                        "datum_rodjenja": val(row,"datum_rodjenja(YYYY-MM-DD)") or val(row,"datum_rodjenja"),
-                        "spol": val(row,"spol(m/ž)") or val(row,"spol"),
-                        "oib": val(row,"oib"),
-                        "mjesto": val(row,"mjesto"),
-                        "email_sportas": val(row,"email_sportas"),
-                        "email_roditelj": val(row,"email_roditelj"),
-                        "osobna_broj": val(row,"osobna_broj"),
-                        "osobna_vrijedi_do": val(row,"osobna_vrijedi_do(YYYY-MM-DD)") or val(row,"osobna_vrijedi_do"),
-                        "osobna_izdao": val(row,"osobna_izdao"),
-                        "putovnica_broj": val(row,"putovnica_broj"),
-                        "putovnica_vrijedi_do": val(row,"putovnica_vrijedi_do(YYYY-MM-DD)") or val(row,"putovnica_vrijedi_do"),
-                        "putovnica_izdao": val(row,"putovnica_izdao"),
-                        "aktivan_natjecatelj": (val(row,"aktivan_natjecatelj(da/ne)") or val(row,"aktivan_natjecatelj")).lower()=="da",
-                        "veteran": (val(row,"veteran(da/ne)") or val(row,"veteran")).lower()=="da",
-                        "ostalo": (val(row,"ostalo(da/ne)") or val(row,"ostalo")).lower()=="da",
-                        "placa_clanarinu": (val(row,"placa_clanarinu(da/ne)") or val(row,"placa_clanarinu")).lower()=="da",
-                        "iznos_clanarine": float((val(row,"iznos_clanarine(decimal)") or val(row,"iznos_clanarine") or "30").replace(",",".")),
-                        "grupa": val(row,"grupa"),
-                        "slika_path": "",
-                        "pristupnica_pdf": "",
-                        "privola_pdf": "",
-                        "pristupnica_upload": "",
-                        "privola_upload": "",
-                        "lijecnicka_upload": "",
-                        "lijecnicka_vrijedi_do": val(row,"lijecnicka_vrijedi_do(YYYY-MM-DD)") or "",
-                        "datum_pristupa": datetime.date.today().isoformat(),
-                    }
-                    members["items"].append(m); count+=1
-                save_members(members)
-                st.success(f"Uvezeno članova: {count}")
-    with c3:
-        if st.button("📤 Izvoz članova (XLSX)"):
-            wb = Workbook(); ws = wb.active; ws.title = "Clanovi"
-            headers = [
-                "id","ime_prezime","datum_rodjenja","spol","oib","mjesto",
-                "email_sportas","email_roditelj",
-                "osobna_broj","osobna_vrijedi_do","osobna_izdao",
-                "putovnica_broj","putovnica_vrijedi_do","putovnica_izdao",
-                "aktivan_natjecatelj","veteran","ostalo",
-                "placa_clanarinu","iznos_clanarine","grupa",
-                "datum_pristupa","lijecnicka_vrijedi_do"
-            ]
-            ws.append(headers)
-            for m in members["items"]:
-                ws.append([
-                    m.get("id"), m.get("ime_prezime"), m.get("datum_rodjenja"), m.get("spol"),
-                    m.get("oib"), m.get("mjesto"), m.get("email_sportas"), m.get("email_roditelj"),
-                    m.get("osobna_broj"), m.get("osobna_vrijedi_do"), m.get("osobna_izdao"),
-                    m.get("putovnica_broj"), m.get("putovnica_vrijedi_do"), m.get("putovnica_izdao"),
-                    "da" if m.get("aktivan_natjecatelj") else "ne",
-                    "da" if m.get("veteran") else "ne",
-                    "da" if m.get("ostalo") else "ne",
-                    "da" if m.get("placa_clanarinu") else "ne",
-                    m.get("iznos_clanarine"),
-                    m.get("grupa"),
-                    m.get("datum_pristupa"),
-                    m.get("lijecnicka_vrijedi_do"),
-                ])
-            bio = BytesIO(); wb.save(bio); bio.seek(0)
-            st.download_button("⬇️ Preuzmi članove", data=bio.getvalue(),
-                               file_name="clanovi_izvoz.xlsx",
-                               mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                               key="dl_export")
+    date_from = c1.date_input("Datum od", value=date.today())
+    date_to = c2.date_input("Datum do", value=date.today())
+    place = c3.text_input("Mjesto")
+    style = st.selectbox("Hrvački stil", ["GR","FS","WW","BW","MODIFICIRANO"])
+    age = st.selectbox("Uzrast", ["POČETNICI","U11","U13","U15","U17","U20","U23","SENIORI"])
+    country = st.text_input("Država"); iso3 = st.text_input("ISO-3 (npr. HRV)")
+    n1,n2,n3,n4,n5 = st.columns(5)
+    team_rank = n1.number_input("Ekipni poredak", min_value=0, step=1)
+    club_n = n2.number_input("Broj klupskih natjecatelja", min_value=0, step=1)
+    total_n = n3.number_input("Uk. natjecatelja", min_value=0, step=1)
+    clubs_n = n4.number_input("Broj klubova", min_value=0, step=1)
+    countries_n = n5.number_input("Broj zemalja", min_value=0, step=1)
+    notes = st.text_area("Zapažanje trenera / opis")
+    gallery = st.file_uploader("Slike (višestruko)", type=["png","jpg","jpeg"], accept_multiple_files=True)
+    bulletin_url = st.text_input("Poveznica na rezultate / bilten"); website_link = st.text_input("Poveznica na objavu na webu")
+    if st.button("Spremi natjecanje"):
+        paths = [save_upload(f,"competitions/gallery") for f in (gallery or [])]
+        conn.execute("""INSERT INTO competitions(kind,kind_other,name,date_from,date_to,place,style,age_cat,country,country_iso3,team_rank,club_competitors,total_competitors,clubs_count,countries_count,coaches_json,notes,bulletin_url,website_link,gallery_paths_json)
+                        VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                     (kind,kind_other,name,date_from.isoformat(),date_to.isoformat(),place,style,age,country,iso3,int(team_rank),int(club_n),int(total_n),int(clubs_n),int(countries_n),"[]",notes,bulletin_url,website_link,json.dumps(paths)))
+        conn.commit(); st.success("Natjecanje spremljeno.")
+    st.markdown("---"); st.markdown("### Rezultati")
+    comps = pd.read_sql_query("SELECT id, COALESCE(name, kind) AS title, date_from FROM competitions ORDER BY date_from DESC", conn)
+    comp_opts = {f"{r['id']} – {r['title']} ({r['date_from']})": r['id'] for _, r in comps.iterrows()}
+    comp_sel = st.selectbox("Odaberi natjecanje", options=["-"] + list(comp_opts.keys()))
+    mems = pd.read_sql_query("SELECT id, first_name || ' ' || last_name AS full FROM members ORDER BY last_name, first_name", conn)
+    mem_opts = {f"{r['id']} – {r['full']}": r['id'] for _, r in mems.iterrows()}
+    if comp_sel != "-":
+        comp_id = comp_opts[comp_sel]
+        mem_sel = st.selectbox("Član", options=["-"] + list(mem_opts.keys()))
+        if mem_sel != "-":
+            member_id = mem_opts[mem_sel]
+            c1,c2,c3 = st.columns(3)
+            category = c1.text_input("Kategorija / težina")
+            stl = c2.selectbox("Stil", ["GR","FS","WW","BW","MODIFICIRANO"])
+            fights = c3.number_input("Ukupno borbi", min_value=0, step=1)
+            wins = c1.number_input("Pobjede", min_value=0, step=1)
+            losses = c2.number_input("Porazi", min_value=0, step=1)
+            placement = c3.number_input("Plasman (1–100)", min_value=0, max_value=100, step=1)
+            wins_d = st.text_area("Pobjede – unesite stavke odvojene | (npr. 'Ivo Ivić;HKX | Marko Markić;HKY')")
+            losses_d = st.text_area("Porazi – unesite stavke odvojene |")
+            note = st.text_area("Napomena trenera")
+            if st.button("Spremi rezultat"):
+                conn.execute("""INSERT INTO results(competition_id,member_id,category,style,fights_total,wins,losses,placement,wins_detail_json,losses_detail_json,note)
+                                VALUES(?,?,?,?,?,?,?,?,?,?,?)""",
+                             (comp_id, member_id, category, stl, int(fights), int(wins), int(losses), int(placement),
+                              json.dumps([s for s in wins_d.split('|') if s.strip()]), json.dumps([s for s in losses_d.split('|') if s.strip()]), note))
+                conn.commit(); st.success("Rezultat spremljen.")
+    year = st.number_input("Godina za izvoz", min_value=2000, max_value=2100, value=datetime.now().year, step=1)
+    df = pd.read_sql_query("""SELECT c.date_from, c.kind, c.name, c.place, c.style, c.age_cat, r.member_id,
+           (SELECT first_name || ' ' || last_name FROM members m WHERE m.id=r.member_id) AS sportas,
+           r.category, r.fights_total, r.wins, r.losses, r.placement
+        FROM results r JOIN competitions c ON r.competition_id=c.id WHERE substr(c.date_from,1,4)=?
+        ORDER BY c.date_from DESC""", conn, params=(str(year),))
+    st.dataframe(df, use_container_width=True)
+    st.download_button("Skini rezultate (Excel)", data=excel_bytes(df,"Rezultati"), file_name=f"rezultati_{year}.xlsx", disabled=df.empty)
+    conn.close()
 
-    st.markdown("### Popis članova")
-    # Tablica + upozorenja za liječničku
-    items = load_members()["items"]
-    for m in items:
-        m["lij_preostalo"] = days_to(parse_date(m.get("lijecnicka_vrijedi_do")))
-    if items:
-        for m in sorted(items, key=lambda x: (x.get("ime_prezime",""), x["id"])):
-            warn = (m["lij_preostalo"] is not None and m["lij_preostalo"] <= 14)
-            with st.container(border=True):
-                cols = st.columns([3,2,2,2,3])
-                with cols[0]:
-                    st.markdown(f"**{m['ime_prezime']}**  \nDOB: {m.get('datum_rodjenja','')}  \nOIB: {m.get('oib','')}")
-                    if m.get("slika_path") and Path(m["slika_path"]).exists():
-                        st.image(m["slika_path"], width=120)
-                with cols[1]:
-                    st.markdown(f"Grupa: **{m.get('grupa','—')}**")
-                    st.markdown(f"Aktivan: **{'Da' if m.get('aktivan_natjecatelj') else 'Ne'}**")
-                    if m.get("placa_clanarinu"):
-                        st.markdown(f"Članarina: **{float(m.get('iznos_clanarine') or 0):.2f} €**")
-                    else:
-                        st.markdown("Članarina: **Ne plaća**")
-                with cols[2]:
-                    if m.get("lijecnicka_vrijedi_do"):
-                        txt = f"Liječnička do: **{m['lijecnicka_vrijedi_do']}**"
-                        if warn: txt += f"  \n:warning: Istječe za **{m['lij_preostalo']}** dana"
-                        st.markdown(txt)
-                    else:
-                        st.markdown("Liječnička: —")
-                with cols[3]:
-                    # download tipke za dokumente ako postoje
-                    for key, label in [("pristupnica_pdf","Pristupnica (PDF)"),
-                                       ("privola_pdf","Privola (PDF)"),
-                                       ("pristupnica_upload","Pristupnica (upl.)"),
-                                       ("privola_upload","Privola (upl.)"),
-                                       ("lijecnicka_upload","Liječnička (upl.)")]:
-                        p = m.get(key)
-                        if p and Path(p).exists():
-                            with open(p, "rb") as fh:
-                                st.download_button(f"📥 {label}", data=fh.read(), file_name=Path(p).name, key=f"{key}_{m['id']}")
-                with cols[4]:
-                    # brzi "brisanje"
-                    if st.button("🗑️ Obriši", key=f"del_{m['id']}"):
-                        mem = load_members()
-                        mem["items"] = [x for x in mem["items"] if int(x["id"]) != int(m["id"])]
-                        save_members(mem)
-                        st.rerun()
+# ---- Sekcija 5: Statistika ----
+def section_stats():
+    page_header("Statistika", "Po godini, vrsti i stilu")
+    conn = get_conn()
+    year = st.number_input("Godina", min_value=2000, max_value=2100, value=datetime.now().year, step=1, key="stat_year_v7_1")
+    df = pd.read_sql_query("""SELECT c.kind, c.age_cat, r.style,
+        SUM(r.fights_total) AS borbi, SUM(r.wins) AS pobjede, SUM(r.losses) AS porazi,
+        SUM(CASE WHEN r.placement=1 THEN 1 ELSE 0 END) AS zlato,
+        SUM(CASE WHEN r.placement=2 THEN 1 ELSE 0 END) AS srebro,
+        SUM(CASE WHEN r.placement=3 THEN 1 ELSE 0 END) AS bronca
+        FROM competitions c JOIN results r ON r.competition_id=c.id
+        WHERE substr(c.date_from,1,4)=?
+        GROUP BY c.kind, c.age_cat, r.style
+        ORDER BY c.kind, c.age_cat""", conn, params=(str(year),))
+    st.dataframe(df, use_container_width=True)
+    st.download_button("Skini statistiku (Excel)", data=excel_bytes(df, "Statistika"), file_name=f"stat_{year}.xlsx", disabled=df.empty)
+    conn.close()
 
-    else:
-        st.info("Još nema unesenih članova.")
+# ---- App ----
+def main():
+    st.set_page_config(page_title="HK Podravka – Admin", layout="wide")
+    css_style()
+    init_db()
+    menu = st.sidebar.radio("Izbornik", ["Klub", "Članovi", "Treneri", "Natjecanja i rezultati", "Statistika"])
+    if menu == "Klub": section_club()
+    elif menu == "Članovi": section_members()
+    elif menu == "Treneri": section_coaches()
+    elif menu == "Natjecanja i rezultati": section_competitions()
+    else: section_stats()
 
-# --------------------- Kraj ---------------------
-# ===================== SEKCIJA 3 – TRENERI =====================
-# (Zalijepi ispod postojećeg koda bez izmjena gore)
-
-import datetime
-from pathlib import Path
-from io import BytesIO
-
-try:
-    # koristimo postojeće pomoćne varijable/funkcije ako postoje
-    DATA_DIR
-except NameError:
-    # minimalni fallback (neće se koristiti ako je sekcija 1/2 već zalijepljena)
-    from pathlib import Path
-    DATA_DIR = Path("data"); DATA_DIR.mkdir(exist_ok=True)
-    UPLOAD_DIR = Path("uploads"); UPLOAD_DIR.mkdir(exist_ok=True)
-    def load_json(p, d):
-        import json
-        return json.loads(Path(p).read_text("utf-8")) if Path(p).exists() else d
-    def save_json(p, data):
-        import json
-        Path(p).write_text(json.dumps(data, ensure_ascii=False, indent=2), encoding="utf-8")
-    def safe_save(file, target_dir: Path):
-        if not file: return ""
-        name = Path(file.name); ext = name.suffix.lower()
-        stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        safe = f"{name.stem}_{stamp}{ext}"
-        out = target_dir / safe; out.write_bytes(file.read()); return str(out)
-
-try:
-    import streamlit as st
-except:
-    pass  # ako nije streamlit okruženje, ova sekcija se jednostavno neće renderirati
-
-TRAINERS_JSON = DATA_DIR / "trainers.json"
-TRAINER_DIR = (UPLOAD_DIR / "trainers")
-TRAINER_DIR.mkdir(parents=True, exist_ok=True)
-
-def load_trainers():
-    return load_json(TRAINERS_JSON, {"seq": 1, "items": []})
-
-def save_trainers(d):
-    save_json(TRAINERS_JSON, d)
-
-def new_trainer_id(store):
-    tid = store["seq"]; store["seq"] += 1; return tid
-
-# ------- UI: naslov izvan starih tabova, pojavit će se ispod Sekcije 2 -------
-st.markdown("---")
-st.subheader("🏋️‍♂️ Treneri (Sekcija 3)")
-
-trainers = load_trainers()
-
-# ========== PREDLOŽAK / UVOZ / IZVOZ ==========
-from openpyxl import Workbook, load_workbook
-
-cc1, cc2, cc3 = st.columns(3)
-with cc1:
-    if st.button("📄 Predložak (treneri.xlsx)"):
-        wb = Workbook(); ws = wb.active; ws.title = "Treneri"
-        ws.append([
-            "ime_prezime","datum_rodjenja(YYYY-MM-DD)","oib","email","iban",
-            "grupe(više odvojenih zarezom)"
-        ])
-        bio = BytesIO(); wb.save(bio); bio.seek(0)
-        st.download_button("⬇️ Preuzmi predložak", bio.getvalue(),
-                           file_name="predlozak_treneri.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           key="dl_tr_tpl")
-with cc2:
-    upl_tr = st.file_uploader("Uvoz trenera (.xlsx)", type=["xlsx"], key="upl_tr_xlsx")
-    if upl_tr and st.button("📥 Uvezi .xlsx"):
-        wb = load_workbook(upl_tr); ws = wb.active
-        rows = list(ws.iter_rows(values_only=True))
-        if rows:
-            header = [str(h).strip() if h is not None else "" for h in rows[0]]
-            idx = {h:i for i,h in enumerate(header)}
-            def val(row, key):
-                i = idx.get(key, None)
-                return (str(row[i]).strip() if i is not None and row[i] is not None else "")
-            cnt = 0
-            for row in rows[1:]:
-                if not row: continue
-                name = val(row, "ime_prezime")
-                if not name: continue
-                t = {
-                    "id": new_trainer_id(trainers),
-                    "ime_prezime": name,
-                    "datum_rodjenja": val(row, "datum_rodjenja(YYYY-MM-DD)") or "",
-                    "oib": val(row, "oib"),
-                    "email": val(row, "email"),
-                    "iban": val(row, "iban"),
-                    "grupe": [s.strip() for s in (val(row, "grupe(više odvojenih zarezom)") or "").split(",") if s.strip()],
-                    "slika_path": "",
-                    "ugovor_path": "",
-                    "ostali_dokumenti": []
-                }
-                trainers["items"].append(t); cnt += 1
-            save_trainers(trainers)
-            st.success(f"Uvezeno trenera: {cnt}")
-with cc3:
-    if st.button("📤 Izvoz trenera (XLSX)"):
-        wb = Workbook(); ws = wb.active; ws.title = "Treneri"
-        ws.append(["id","ime_prezime","datum_rodjenja","oib","email","iban","grupe"])
-        for t in trainers["items"]:
-            ws.append([
-                t.get("id"), t.get("ime_prezime"), t.get("datum_rodjenja"),
-                t.get("oib"), t.get("email"), t.get("iban"),
-                ", ".join(t.get("grupe", []))
-            ])
-        bio = BytesIO(); wb.save(bio); bio.seek(0)
-        st.download_button("⬇️ Preuzmi trenere", bio.getvalue(),
-                           file_name="treneri_izvoz.xlsx",
-                           mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-                           key="dl_tr_export")
-
-st.markdown("")
-
-# ========== DODAJ / UREDI TRENERA ==========
-if "edit_trainer_id" not in st.session_state:
-    st.session_state.edit_trainer_id = None
-
-with st.expander("➕ Dodaj / uredi trenera", expanded=True):
-    editing = None
-    if st.session_state.edit_trainer_id:
-        editing = next((x for x in trainers["items"] if x["id"] == st.session_state.edit_trainer_id), None)
-
-    with st.form("frm_trener"):
-        c1, c2, c3 = st.columns(3)
-        with c1:
-            ime = st.text_input("Ime i prezime", value=(editing or {}).get("ime_prezime",""))
-            dob = st.date_input("Datum rođenja", value=(
-                datetime.date.fromisoformat(editing["datum_rodjenja"]) if (editing and editing.get("datum_rodjenja")) else None
-            ), format="YYYY-MM-DD")
-            oib = st.text_input("OIB", value=(editing or {}).get("oib",""))
-            slika_f = st.file_uploader("Slika trenera (jpg/png/svg/webp)", type=["jpg","jpeg","png","svg","webp"], key="tr_slika")
-        with c2:
-            email = st.text_input("E-mail", value=(editing or {}).get("email",""))
-            iban = st.text_input("IBAN", value=(editing or {}).get("iban",""))
-            grupe_sve = sorted(set(
-                ["Hrvači U11","Hrvači U13","Hrvači U15","Hrvači U17","Hrvači U20","Seniori",
-                 "Hrvačice U13","Hrvačice U15","Hrvačice U17","Hrvačice U20","Veterani","Ostalo"] +
-                sum([t.get("grupe", []) for t in trainers["items"]], [])
-            ))
-            grupe = st.multiselect("Grupa/e koju vodi", options=grupe_sve,
-                                   default=(editing or {}).get("grupe", []))
-        with c3:
-            ugovor_f = st.file_uploader("Ugovor (PDF/Doc)", type=["pdf","doc","docx"], key="tr_ugovor")
-            ostali_f = st.file_uploader("Ostali dokumenti", type=["pdf","doc","docx","xls","xlsx","jpg","jpeg","png"], accept_multiple_files=True, key="tr_docs")
-
-        submit = st.form_submit_button("💾 Spremi trenera")
-        if submit:
-            store = trainers
-            if editing:  # ažuriranje postojećeg
-                t = editing
-            else:        # novi
-                t = {"id": new_trainer_id(store), "slika_path":"", "ugovor_path":"", "ostali_dokumenti": []}
-
-            t["ime_prezime"] = ime.strip()
-            t["datum_rodjenja"] = dob.isoformat() if dob else ""
-            t["oib"] = oib.strip()
-            t["email"] = email.strip()
-            t["iban"] = iban.strip()
-            t["grupe"] = grupe
-
-            if slika_f:
-                t["slika_path"] = safe_save(slika_f, TRAINER_DIR)
-            if ugovor_f:
-                t["ugovor_path"] = safe_save(ugovor_f, TRAINER_DIR)
-            if ostali_f:
-                lst = t.get("ostali_dokumenti", [])
-                for f in ostali_f:
-                    lst.append(safe_save(f, TRAINER_DIR))
-                t["ostali_dokumenti"] = lst
-
-            if editing:
-                # zamijeni zapis
-                store["items"] = [x if x["id"] != t["id"] else t for x in store["items"]]
-            else:
-                store["items"].append(t)
-
-            save_trainers(store)
-            st.session_state.edit_trainer_id = None
-            st.success("Trener spremljen.")
-            st.rerun()
-
-# ========== POPIS TRENERA ==========
-st.markdown("### Popis trenera")
-items_t = sorted(load_trainers()["items"], key=lambda x: (x.get("ime_prezime",""), x["id"]))
-
-if not items_t:
-    st.info("Još nema unesenih trenera.")
-else:
-    import math
-    per_row = 2
-    rows = math.ceil(len(items_t) / per_row)
-    for r in range(rows):
-        cols = st.columns(per_row)
-        for i, col in enumerate(cols):
-            idx = r*per_row + i
-            if idx >= len(items_t): continue
-            t = items_t[idx]
-            with col:
-                with st.container(border=True):
-                    top = st.columns([1,2])
-                    with top[0]:
-                        if t.get("slika_path") and Path(t["slika_path"]).exists():
-                            st.image(t["slika_path"], width=120)
-                        else:
-                            st.caption("Nema slike")
-                    with top[1]:
-                        st.markdown(f"**{t.get('ime_prezime','')}**")
-                        st.markdown(f"📧 {t.get('email','—')}")
-                        st.markdown(f"🆔 OIB: {t.get('oib','—')}")
-                        st.markdown(f"🏦 IBAN: {t.get('iban','—')}")
-                        gr = t.get("grupe", [])
-                        st.markdown("👥 Grupe: " + (", ".join(gr) if gr else "—"))
-
-                    # dokumenti – download gumbi
-                    docs = []
-                    if t.get("ugovor_path") and Path(t["ugovor_path"]).exists():
-                        docs.append(("Ugovor", t["ugovor_path"]))
-                    for j, p in enumerate(t.get("ostali_dokumenti", [])):
-                        if p and Path(p).exists():
-                            docs.append((f"Dokument {j+1}", p))
-                    if docs:
-                        st.markdown("**Dokumenti:**")
-                        for lbl, pth in docs:
-                            with open(pth, "rb") as fh:
-                                st.download_button(f"📥 {lbl}", fh.read(), file_name=Path(pth).name, key=f"dl_{t['id']}_{lbl}")
-
-                    # akcije
-                    a1, a2 = st.columns(2)
-                    with a1:
-                        if st.button("✏️ Uredi", key=f"edit_{t['id']}"):
-                            st.session_state.edit_trainer_id = t["id"]
-                            st.experimental_rerun() if hasattr(st, "experimental_rerun") else st.rerun()
-                    with a2:
-                        if st.button("🗑️ Obriši", key=f"del_{t['id']}"):
-                            store = load_trainers()
-                            store["items"] = [x for x in store["items"] if x["id"] != t["id"]]
-                            save_trainers(store)
-                            st.success("Trener obrisan.")
-                            st.rerun()
-
+if __name__ == "__main__":
+    main()
