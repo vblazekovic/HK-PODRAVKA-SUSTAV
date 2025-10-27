@@ -437,16 +437,28 @@ def section_competitions():
 def section_stats():
     page_header("Statistika", "Po godini, vrsti i stilu")
     conn = get_conn()
-    year = st.number_input("Godina", min_value=2000, max_value=2100, value=datetime.now().year, step=1, key="stat_year_v7_1")
-    df = pd.read_sql_query("""SELECT c.kind, c.age_cat, r.style,
+    st.subheader("Napredni filtri")
+    c1,c2,c3,c4 = st.columns(4)
+    with c1:
+        year_from = st.number_input("Godina od", min_value=2000, max_value=2100, value=datetime.now().year-3, step=1)
+    with c2:
+        year_to = st.number_input("Godina do", min_value=2000, max_value=2100, value=datetime.now().year, step=1)
+    with c3:
+        group_filter = st.selectbox("Grupa", options=["(sve)"] + pd.read_sql_query("SELECT DISTINCT COALESCE(group_name,'') AS g FROM members ORDER BY g", conn)['g'].fillna('').tolist())
+    with c4:
+        _d = pd.read_sql_query("SELECT DISTINCT json_each.value AS coach FROM competitions, json_each(competitions.coaches_json) ORDER BY 1", conn)
+        coach_filter = st.selectbox("Trener", options=["(svi)"] + _d['coach'].fillna('').tolist() if not _d.empty else ["(svi)"])
+    year = year_to
+    where, pars = _stats_where_clause(group_filter, coach_filter, year_from, year_to)
+    df = pd.read_sql_query(f"""SELECT c.kind, c.age_cat, r.style,
         SUM(r.fights_total) AS borbi, SUM(r.wins) AS pobjede, SUM(r.losses) AS porazi,
         SUM(CASE WHEN r.placement=1 THEN 1 ELSE 0 END) AS zlato,
         SUM(CASE WHEN r.placement=2 THEN 1 ELSE 0 END) AS srebro,
         SUM(CASE WHEN r.placement=3 THEN 1 ELSE 0 END) AS bronca
         FROM competitions c JOIN results r ON r.competition_id=c.id
-        WHERE substr(c.date_from,1,4)=?
+        {where}
         GROUP BY c.kind, c.age_cat, r.style
-        ORDER BY c.kind, c.age_cat""", conn, params=(str(year),))
+        ORDER BY c.kind, c.age_cat""", conn, params=pars)
     st.dataframe(df, use_container_width=True)
     st.download_button("Skini statistiku (Excel)", data=excel_bytes(df, "Statistika"), file_name=f"stat_{year}.xlsx", disabled=df.empty)
     conn.close()
@@ -475,6 +487,68 @@ def section_stats():
         ORDER BY c.age_cat""", conn, params=(str(year),))
     if not df_u.empty:
         st.bar_chart(df_u.set_index('uzrast')[['pobjede','porazi']])
+
+    # Po vrsti natjecanja
+
+    st.divider()
+    st.subheader("Per-sportaš (po godinama)")
+    athletes = pd.read_sql_query("SELECT id, first_name || ' ' || last_name AS ime FROM members ORDER BY last_name, first_name", conn)
+    sel_ath = st.selectbox("Sportaš", options=["(odaberi)"] + athletes['ime'].tolist())
+    if sel_ath != "(odaberi)":
+        aid = int(athletes.loc[athletes['ime']==sel_ath,'id'].values[0])
+        dfa = pd.read_sql_query("""
+            SELECT substr(c.date_from,1,4) AS godina,
+                   SUM(r.fights_total) AS borbi,
+                   SUM(r.wins) AS pobjede,
+                   SUM(r.losses) AS porazi,
+                   SUM(CASE WHEN r.placement IN (1,2,3) THEN 1 ELSE 0 END) AS medalje
+            FROM competitions c JOIN results r ON r.competition_id=c.id
+            WHERE r.member_id=?
+            GROUP BY substr(c.date_from,1,4)
+            ORDER BY godina
+        """, conn, params=(aid,))
+        if not dfa.empty:
+            st.bar_chart(dfa.set_index('godina')[['borbi','pobjede','porazi','medalje']])
+
+    st.divider()
+    st.subheader("Per-trener (po godinama)")
+    coaches_list = pd.read_sql_query("SELECT DISTINCT json_each.value AS coach FROM competitions, json_each(competitions.coaches_json) ORDER BY 1", conn)
+    sel_coach = st.selectbox("Trener", options=["(odaberi)"] + coaches_list['coach'].fillna('').tolist()) if not coaches_list.empty else "(odaberi)"
+    if sel_coach != "(odaberi)":
+        dfc = pd.read_sql_query("""
+            SELECT substr(c.date_from,1,4) AS godina,
+                   COUNT(DISTINCT c.id) AS broj_natjecanja,
+                   SUM(CASE WHEN r.placement IN (1,2,3) THEN 1 ELSE 0 END) AS medalje
+            FROM competitions c JOIN results r ON r.competition_id=c.id
+            WHERE EXISTS (SELECT 1 FROM json_each(c.coaches_json) j WHERE j.value = ?)
+            GROUP BY substr(c.date_from,1,4)
+            ORDER BY godina
+        """, conn, params=(sel_coach,))
+        if not dfc.empty:
+            st.bar_chart(dfc.set_index('godina')[['broj_natjecanja','medalje']])
+
+    st.divider()
+    st.subheader("Izvoz napredne statistike (Excel)")
+    import io
+    out = io.BytesIO()
+    with pd.ExcelWriter(out, engine='xlsxwriter') as writer:
+        df.to_excel(writer, index=False, sheet_name='Sažetak')
+        try:
+            df_y.to_excel(writer, index=False, sheet_name='Po_godinama')
+        except Exception: pass
+        try:
+            df_u.to_excel(writer, index=False, sheet_name='Po_uzrastima')
+        except Exception: pass
+        try:
+            df_k.to_excel(writer, index=False, sheet_name='Po_vrsti')
+        except Exception: pass
+        try:
+            dfa.to_excel(writer, index=False, sheet_name='Sportas_godine')
+        except Exception: pass
+        try:
+            dfc.to_excel(writer, index=False, sheet_name='Trener_godine')
+        except Exception: pass
+    st.download_button("Skini Excel (sve tablice)", data=out.getvalue(), file_name=f"statistike_{year_from}-{year_to}.xlsx")
 
     # Po vrsti natjecanja
     df_k = pd.read_sql_query("""SELECT c.kind AS natjecanje,
@@ -653,6 +727,28 @@ def section_attendance():
 
     # Kreiranje treninga
     st.subheader("Evidencija treninga")
+st.caption("Brzo stvaranje termina iz tjednog rasporeda")
+colq = st.columns(3)
+with colq[0]:
+    _dfgs = pd.read_sql_query("SELECT DISTINCT group_name FROM group_schedules ORDER BY group_name", conn)
+    q_group = st.selectbox("Grupa (raspored)", options=_dfgs["group_name"].tolist() if not _dfgs.empty else ["-"])
+with colq[1]: q_day = st.selectbox("Dan", options=[("Danas", -1),("Ponedjeljak",0),("Utorak",1),("Srijeda",2),("Četvrtak",3),("Petak",4),("Subota",5),("Nedjelja",6)], index=0, format_func=lambda x: x[0])
+with colq[2]: q_loc_override = st.text_input("Lokacija (po želji nadjačaj)")
+if st.button("Kreiraj današnji trening iz rasporeda") and q_group != "-":
+    import datetime
+    wd = datetime.datetime.now().weekday() if q_day[1] == -1 else q_day[1]
+    rows = pd.read_sql_query("SELECT * FROM group_schedules WHERE group_name=? AND day_of_week=? ORDER BY start_time", conn, params=(q_group, int(wd)))
+    if rows.empty:
+        st.warning("Nema stavki rasporeda za odabrani dan.")
+    else:
+        for _, rr in rows.iterrows():
+            today = datetime.datetime.now().date()
+            stime = datetime.datetime.combine(today, datetime.time.fromisoformat(rr["start_time"]))
+            etime = datetime.datetime.combine(today, datetime.time.fromisoformat(rr["end_time"]))
+            cur.execute("""INSERT INTO training_sessions (trainer_id, trainer_name, group_name, start_dt, end_dt, location, rep_prep)
+                           VALUES (?,?,?,?,?,?,0)""", (rr["coach_id"], rr["coach_name"], rr["group_name"], stime.isoformat(), etime.isoformat(), (q_loc_override or rr["location"])))
+        conn.commit(); st.success("Kreirani treninzi prema rasporedu.")
+
     # Treneri i grupe
     coaches = pd.read_sql_query("SELECT id, first_name || ' ' || last_name AS ime FROM coaches ORDER BY last_name, first_name", conn)
     groups = pd.read_sql_query("SELECT name FROM groups ORDER BY name", conn)
@@ -746,3 +842,15 @@ def section_attendance():
 
 if __name__ == "__main__":
     main()
+
+
+def _stats_where_clause(group_filter, coach_filter, year_from, year_to):
+    where = " WHERE substr(c.date_from,1,4) BETWEEN ? AND ? "
+    params = [str(year_from), str(year_to)]
+    if coach_filter and coach_filter != "(svi)":
+        where += " AND EXISTS (SELECT 1 FROM json_each(c.coaches_json) j WHERE j.value = ?) "
+        params.append(coach_filter)
+    if group_filter and group_filter != "(sve)":
+        where += " AND EXISTS (SELECT 1 FROM members mm WHERE mm.id=r.member_id AND COALESCE(mm.group_name,'') = ?) "
+        params.append(group_filter if group_filter != "(sve)" else "")
+    return where, params
